@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Cormorant Garamond", Georgia, serif;
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-navy-950: #060B17;
+  --color-navy-900: #0A1124;
+  --color-navy-850: #0E1832;
+  --color-navy-800: #132142;
+  --color-royal-700: #1A3060;
+  --color-royal-600: #223E7A;
+  --color-gold-300: #E5C88B;
+  --color-gold-400: #D4B26A;
+  --color-gold-500: #C29B4B;
+  --color-gold-600: #9C7932;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    background-color: #060B17;
+    color: #F4F6FA;
+    scroll-behavior: smooth;
+  }
+
+  .font-display {
+    font-family: var(--font-display);
+  }
+
+  .font-mono-tabular {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Subtle Islamic geometric lattice overlay (low contrast architectural detail) */
+.islamic-lattice-bg {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Cg fill='none' stroke='%23C9A45C' stroke-opacity='0.06' stroke-width='0.75'%3E%3Cpath d='M32 4 L39 25 L60 32 L39 39 L32 60 L25 39 L4 32 L25 25 Z'/%3E%3Crect x='14' y='14' width='36' height='36' transform='rotate(45 32 32)'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 64px 64px;
+}
+
+/* Clean custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #070D1B;
+}
+::-webkit-scrollbar-thumb {
+  background: #1C2E57;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #C9A45C;
+}
+
+@keyframes goldShimmer {
+  0% {
+    background-position: 200% center;
+  }
+  100% {
+    background-position: -200% center;
+  }
+}
+
+.gold-shimmer-line {
+  background: linear-gradient(90deg, rgba(201, 164, 92, 0.15), rgba(229, 200, 139, 0.75), rgba(201, 164, 92, 0.15));
+  background-size: 200% 100%;
+  animation: goldShimmer 6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gold-shimmer-line {
+    animation: none;
+  }
+  * {
+    scroll-behavior: auto !important;
+  }
+}

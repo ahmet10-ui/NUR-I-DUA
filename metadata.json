@@ -1,0 +1,6 @@
+{
+  "name": "NUR-I DUA",
+  "description": "Interactive Islamic prayer broadcast studio with two animated 3D digital scholars, Turkish prayer engine, smart gift queue, and 1080x1920 OBS live studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

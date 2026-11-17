@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">NUR-I DUA</string>
+    <string name="title_activity_main">NUR-I DUA</string>
+    <string name="package_name">com.nur.idua</string>
+    <string name="custom_url_scheme">com.nur.idua</string>
+</resources>

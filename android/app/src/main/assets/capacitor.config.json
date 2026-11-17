@@ -1,0 +1,8 @@
+{
+	"appId": "com.nur.idua",
+	"appName": "NUR-I DUA",
+	"webDir": "dist",
+	"android": {
+		"allowMixedContent": false
+	}
+}

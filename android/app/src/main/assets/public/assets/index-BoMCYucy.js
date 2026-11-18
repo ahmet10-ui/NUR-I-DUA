@@ -12869,9 +12869,24 @@ function getTikTokStateLabel(state) {
 	}
 }
 function normalizeRelayBaseUrl(rawUrl) {
-	const trimmed = rawUrl.trim();
+	let trimmed = rawUrl.trim();
 	if (!trimmed) return "";
-	return trimmed.replace(/\/+$/, "").replace(/\/(connect|disconnect|events|health)$/i, "");
+	if (/^http:\/\/[a-z0-9.-]+\.(onrender\.com|koyeb\.app|fly\.dev)/i.test(trimmed)) trimmed = trimmed.replace(/^http:\/\//i, "https://");
+	const stripEndpointSuffixes = (pathValue) => {
+		let cleaned = pathValue.replace(/\/{2,}/g, "/").replace(/\/+$/, "");
+		let prev = "";
+		while (cleaned !== prev) {
+			prev = cleaned;
+			cleaned = cleaned.replace(/\/(connect|disconnect|events|health|tiktok-connect|status)$/i, "").replace(/\/+$/, "");
+		}
+		return cleaned;
+	};
+	if (/^https?:\/\//i.test(trimmed)) try {
+		const parsed = new URL(trimmed);
+		const basePath = stripEndpointSuffixes(parsed.pathname);
+		return `${parsed.protocol}//${parsed.host}${basePath}`;
+	} catch {}
+	return stripEndpointSuffixes(trimmed.split(/[?#]/)[0]);
 }
 /**
 * Dedicated TikTok LIVE Connector client service.
@@ -13125,22 +13140,29 @@ var TikTokLiveConnectorService = class {
 			roomId: null,
 			viewerCount: null
 		});
+		const connectUrl = `${baseUrl}/connect`;
 		try {
 			const controller = new AbortController();
-			const timeout = globalThis.setTimeout(() => controller.abort(), 8e3);
-			const response = await fetch(`${baseUrl}/connect`, {
+			const timeout = globalThis.setTimeout(() => controller.abort(), 25e3);
+			const response = await fetch(connectUrl, {
 				method: "POST",
-				headers: { "Content-Type": "application/json" },
+				mode: "cors",
+				cache: "no-store",
+				headers: {
+					"Content-Type": "application/json",
+					Accept: "application/json"
+				},
 				body: JSON.stringify({ username: cleanHandle }),
 				signal: controller.signal
 			});
 			globalThis.clearTimeout(timeout);
+			const rawText = await response.text();
 			let payload = {};
-			try {
-				payload = await response.json();
+			if (rawText.trim()) try {
+				payload = JSON.parse(rawText);
 			} catch {}
 			if (!response.ok || !payload.ok) {
-				const errMsg = payload.error || `Relay sunucusu HTTP ${response.status} döndürdü. Yayın (@${cleanHandle}) çevrimdışı veya ulaşılamıyor.`;
+				const errMsg = response.status === 404 ? `Relay sunucusu HTTP 404 döndürdü (İstek: POST ${connectUrl}${payload.error ? ` — ${payload.error}` : ""}). Relay URL alanında yalnızca ana adresi (örn. https://nur-i-dua.onrender.com) girdiğinizden ve sunucuda POST /connect uç noktasının yayında olduğundan emin olun.` : payload.error || `Relay sunucusu HTTP ${response.status} döndürdü (${connectUrl}). Yayın (@${cleanHandle}) çevrimdışı veya ulaşılamıyor.`;
 				this.emitStatus(payload.state === "disconnected" ? "disconnected" : "error", errMsg, {
 					roomId: null,
 					viewerCount: null
@@ -13167,7 +13189,7 @@ var TikTokLiveConnectorService = class {
 			this.callbacks.onLog?.("info", `TikTok LIVE bağlantısı kuruldu: @${cleanHandle}${payload.roomId ? ` (Oda: ${payload.roomId})` : ""}.`);
 			return { ok: true };
 		} catch (err) {
-			const msg = err instanceof Error ? `Node.js TikTok relay sunucusuna ulaşılamadı: ${err.message}` : "Node.js TikTok relay sunucusuna ulaşılamadı.";
+			const msg = err instanceof Error ? `Node.js TikTok relay sunucusuna ulaşılamadı (${connectUrl}): ${err.message}` : `Node.js TikTok relay sunucusuna ulaşılamadı (${connectUrl}).`;
 			this.emitStatus("error", msg, {
 				roomId: null,
 				viewerCount: null
@@ -13188,7 +13210,12 @@ var TikTokLiveConnectorService = class {
 			try {
 				await fetch(`${baseUrl}/disconnect`, {
 					method: "POST",
-					headers: { "Content-Type": "application/json" },
+					mode: "cors",
+					cache: "no-store",
+					headers: {
+						"Content-Type": "application/json",
+						Accept: "application/json"
+					},
 					body: JSON.stringify({ username: sanitizeTikTokHandle(this.config.username) || "fcproplayer7" })
 				});
 			} catch {}

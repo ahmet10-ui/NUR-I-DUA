@@ -31,7 +31,11 @@ function sanitizeDisplayText(raw, fallback) {
 function setCorsHeaders(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Accept, Cache-Control, X-Requested-With'
+  );
+  res.setHeader('Access-Control-Max-Age', '86400');
 }
 
 function sendJson(res, statusCode, data) {
@@ -315,7 +319,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   const parsedUrl = new URL(req.url, `http://${req.headers.host || `localhost:${PORT}`}`);
-  const pathname = parsedUrl.pathname;
+  const pathname = (parsedUrl.pathname || '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
 
   if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
     const active = Array.from(sessions.values()).filter((s) => s.state === 'connected').length;
@@ -330,7 +334,15 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && pathname === '/connect') {
+  if (pathname === '/connect' || pathname === '/tiktok-connect') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        ok: false,
+        state: 'error',
+        error: `Method ${req.method} not allowed. Use POST ${pathname} with JSON body { "username": "fcproplayer7" }.`,
+      });
+      return;
+    }
     try {
       const body = await readJsonBody(req);
       const target = sanitizeHandle(body.username || DEFAULT_USERNAME) || DEFAULT_USERNAME;
@@ -346,7 +358,15 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && pathname === '/disconnect') {
+  if (pathname === '/disconnect') {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, {
+        ok: false,
+        state: 'error',
+        error: `Method ${req.method} not allowed. Use POST /disconnect with JSON body.`,
+      });
+      return;
+    }
     try {
       const body = await readJsonBody(req);
       const target = sanitizeHandle(body.username || DEFAULT_USERNAME) || DEFAULT_USERNAME;

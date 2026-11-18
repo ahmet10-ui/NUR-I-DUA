@@ -318,11 +318,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const parsedUrl = new URL(req.url, `http://${req.headers.host || `localhost:${PORT}`}`);
+  let parsedUrl;
+  try {
+    const safeRawUrl = /^https?:\/\//i.test(req.url)
+      ? req.url
+      : `/${req.url.replace(/^\/+/, '')}`;
+    parsedUrl = new URL(safeRawUrl, 'http://localhost');
+  } catch {
+    sendJson(res, 400, { ok: false, error: 'Malformed URL' });
+    return;
+  }
+
   const pathname = (parsedUrl.pathname || '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
 
-  if (req.method === 'GET' && (pathname === '/' || pathname === '/health')) {
+  if ((req.method === 'GET' || req.method === 'HEAD') && (pathname === '/' || pathname === '/health')) {
     const active = Array.from(sessions.values()).filter((s) => s.state === 'connected').length;
+    if (req.method === 'HEAD') {
+      setCorsHeaders(res);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end();
+      return;
+    }
     sendJson(res, 200, {
       ok: true,
       service: 'nur-i-dua-tiktok-relay',
@@ -424,7 +440,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  sendJson(res, 404, { ok: false, error: 'Not found' });
+  sendJson(res, 404, { ok: false, error: `Not found: ${req.method} ${pathname}` });
 });
 
 server.listen(PORT, HOST, () => {

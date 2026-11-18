@@ -1,7 +1,8 @@
 import http from 'node:http';
-import { URL } from 'node:url';
+import { fileURLToPath, URL, URLSearchParams } from 'node:url';
 import { WebcastPushConnection } from 'tiktok-live-connector';
 
+const __filename = fileURLToPath(import.meta.url);
 const PORT = Number(process.env.PORT || 8080);
 const HOST = process.env.HOST || '0.0.0.0';
 const DEFAULT_USERNAME = sanitizeHandle(process.env.TIKTOK_USERNAME || 'fcproplayer7') || 'fcproplayer7';
@@ -305,35 +306,46 @@ async function connectSession(username) {
   }
 }
 
+function parseRequestPathAndQuery(rawUrl) {
+  const raw = String(rawUrl || '/').trim();
+  const [pathAndProtocol, queryPart = ''] = raw.split('?');
+  let pathOnly = pathAndProtocol.split('#')[0] || '/';
+
+  if (/^https?:\/\//i.test(pathOnly)) {
+    try {
+      pathOnly = new URL(pathOnly).pathname || '/';
+    } catch {
+      pathOnly = '/';
+    }
+  }
+
+  const normalizedPath =
+    (pathOnly.replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/').toLowerCase();
+  const searchParams = new URLSearchParams(queryPart.split('#')[0]);
+  return { pathname: normalizedPath, searchParams };
+}
+
 const server = http.createServer(async (req, res) => {
   if (!req.url) {
     sendJson(res, 400, { ok: false, error: 'Missing URL' });
     return;
   }
 
-  if (req.method === 'OPTIONS') {
+  const method = String(req.method || 'GET').toUpperCase();
+
+  if (method === 'OPTIONS') {
     setCorsHeaders(res);
     res.writeHead(204);
     res.end();
     return;
   }
 
-  let parsedUrl;
-  try {
-    const safeRawUrl = /^https?:\/\//i.test(req.url)
-      ? req.url
-      : `/${req.url.replace(/^\/+/, '')}`;
-    parsedUrl = new URL(safeRawUrl, 'http://localhost');
-  } catch {
-    sendJson(res, 400, { ok: false, error: 'Malformed URL' });
-    return;
-  }
+  const { pathname, searchParams } = parseRequestPathAndQuery(req.url);
 
-  const pathname = (parsedUrl.pathname || '/').replace(/\/{2,}/g, '/').replace(/\/+$/, '') || '/';
-
-  if ((req.method === 'GET' || req.method === 'HEAD') && (pathname === '/' || pathname === '/health')) {
+  // Health & root status routes (evaluated before all other routes and 404 fallback)
+  if ((method === 'GET' || method === 'HEAD') && (pathname === '/' || pathname === '/health')) {
     const active = Array.from(sessions.values()).filter((s) => s.state === 'connected').length;
-    if (req.method === 'HEAD') {
+    if (method === 'HEAD') {
       setCorsHeaders(res);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end();
@@ -351,11 +363,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/connect' || pathname === '/tiktok-connect') {
-    if (req.method !== 'POST') {
+    if (method !== 'POST') {
       sendJson(res, 405, {
         ok: false,
         state: 'error',
-        error: `Method ${req.method} not allowed. Use POST ${pathname} with JSON body { "username": "fcproplayer7" }.`,
+        error: `Method ${method} not allowed. Use POST ${pathname} with JSON body { "username": "fcproplayer7" }.`,
       });
       return;
     }
@@ -375,11 +387,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/disconnect') {
-    if (req.method !== 'POST') {
+    if (method !== 'POST') {
       sendJson(res, 405, {
         ok: false,
         state: 'error',
-        error: `Method ${req.method} not allowed. Use POST /disconnect with JSON body.`,
+        error: `Method ${method} not allowed. Use POST /disconnect with JSON body.`,
       });
       return;
     }
@@ -401,8 +413,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && pathname === '/events') {
-    const target = sanitizeHandle(parsedUrl.searchParams.get('username') || DEFAULT_USERNAME) || DEFAULT_USERNAME;
+  if (method === 'GET' && pathname === '/events') {
+    const target = sanitizeHandle(searchParams.get('username') || DEFAULT_USERNAME) || DEFAULT_USERNAME;
     const session = getOrCreateSession(target);
 
     setCorsHeaders(res);
@@ -440,10 +452,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  sendJson(res, 404, { ok: false, error: `Not found: ${req.method} ${pathname}` });
+  sendJson(res, 404, { ok: false, error: `Not found: ${method} ${pathname}` });
 });
 
 server.listen(PORT, HOST, () => {
+  console.log(`[NUR-I DUA Relay] Entry file: ${__filename}`);
+  console.log(`[NUR-I DUA Relay] Working directory: ${process.cwd()}`);
   console.log(`[NUR-I DUA Relay] Listening on http://${HOST}:${PORT} (default target: @${DEFAULT_USERNAME})`);
 });
 

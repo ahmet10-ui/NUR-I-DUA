@@ -1,6 +1,22 @@
 import React, { useState } from 'react';
-import { Radio, AlertTriangle, Coffee, PlugZap, Unplug } from 'lucide-react';
+import { Radio, AlertTriangle, Coffee, PlugZap, Unplug, ShieldCheck, Server } from 'lucide-react';
 import { useStudio } from '../../context/StudioContext';
+import { getTikTokStateLabel } from '../../services/tiktokLiveConnectorService';
+
+function getStatusBadgeClass(connectionState: string): string {
+  switch (connectionState) {
+    case 'connected':
+      return 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300';
+    case 'connecting':
+      return 'bg-sky-500/15 border-sky-500/40 text-sky-300';
+    case 'error':
+      return 'bg-rose-500/15 border-rose-500/40 text-rose-300';
+    case 'disconnected':
+      return 'bg-slate-700/40 border-slate-500/40 text-slate-300';
+    default:
+      return 'bg-amber-500/15 border-amber-500/40 text-amber-300';
+  }
+}
 
 export const TikTokPage: React.FC = () => {
   const {
@@ -22,6 +38,9 @@ export const TikTokPage: React.FC = () => {
   const [simQty, setSimQty] = useState(1);
   const [simFeedback, setSimFeedback] = useState<string | null>(null);
 
+  const statusLabel = getTikTokStateLabel(tiktok.connectionState);
+  const statusBadgeClass = getStatusBadgeClass(tiktok.connectionState);
+
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
     setConnecting(true);
@@ -29,7 +48,9 @@ export const TikTokPage: React.FC = () => {
     const res = await attemptTikTokConnect();
     setConnecting(false);
     if (!res.ok) {
-      setConnectFeedback(res.error || 'Unable to establish TikTok LIVE connection.');
+      setConnectFeedback(res.error || 'TikTok LIVE bağlantısı kurulamadı.');
+    } else {
+      setConnectFeedback(null);
     }
   };
 
@@ -60,20 +81,43 @@ export const TikTokPage: React.FC = () => {
           TikTok LIVE Connection
         </h1>
         <p className="mt-1 text-sm text-slate-400">
-          Modular gift event adapter separating real TikTok LIVE relay configuration from local simulation tests.
+          Dedicated <code className="font-mono text-slate-200">TikTokLiveConnectorService</code> for public{' '}
+          <span className="text-[#E5C88B] font-medium">@{tiktok.username || 'fcproplayer7'}</span>{' '}
+          stream gifts, strictly isolated from local simulation tests.
         </p>
       </div>
 
-      {/* Honest Integration Banner */}
+      {/* Honest Integration & Architecture Banner */}
       <div className="bg-[#121B35] border border-amber-500/40 p-4 flex items-start gap-3 text-xs text-slate-200 leading-relaxed">
         <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-        <div>
-          <p className="font-semibold text-amber-300">
-            Integration Status: {tiktok.connectionState === 'unconfigured' ? 'Not Configured' : tiktok.connectionState}
+        <div className="space-y-1.5 flex-1">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="font-semibold text-amber-300">
+              Bağlantı Durumu: {statusLabel}
+            </p>
+            <span className={`px-2 py-0.5 border font-mono-tabular text-[11px] ${statusBadgeClass}`}>
+              {statusLabel}
+            </span>
+          </div>
+          <p className="text-slate-300">
+            Android Capacitor uygulaması ve tarayıcılar doğrudan Node.js{' '}
+            <code className="font-mono text-slate-100">tiktok-live-connector</code> paketini çalıştıramaz.
+            Gerçek TikTok canlı hediyelerini almak için bu istemci ayrı bir ücretsiz Node.js Relay Sunucusuna
+            (Render, Koyeb, Fly.io veya yerel bilgisayar) HTTPS + SSE ile bağlanır. Relay URL girilmediğinde
+            durum açıkça <strong>Not Configured</strong> olarak kalır; sahte canlı bağlantı üretilmez.
           </p>
-          <p className="mt-1 text-slate-300">
-            Direct browser access to TikTok LIVE WebCast streams requires an approved external connector or self-hosted relay service. This application never fabricates a live TikTok connection or fake credentials.
-          </p>
+          {tiktok.connectionState === 'connected' && (
+            <p className="text-emerald-300 font-mono-tabular">
+              Aktif Yayın: @{tiktok.username || 'fcproplayer7'}
+              {tiktok.roomId ? ` · Oda ID: ${tiktok.roomId}` : ''}
+              {typeof tiktok.viewerCount === 'number' ? ` · İzleyici: ${tiktok.viewerCount}` : ''}
+            </p>
+          )}
+          {tiktok.lastError && (
+            <p className="text-rose-300">
+              Son Bilgi/Hata: {tiktok.lastError}
+            </p>
+          )}
         </div>
       </div>
 
@@ -83,13 +127,13 @@ export const TikTokPage: React.FC = () => {
           onSubmit={handleConnect}
           className="bg-[#0B142B] border border-[#1B2D58] p-5 space-y-4"
         >
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <h2 className="text-base font-semibold text-white flex items-center gap-2">
               <Radio className="w-4 h-4 text-[#D4B26A]" />
               <span>Real TikTok Connector Configuration</span>
             </h2>
-            <span className="text-xs font-mono-tabular text-amber-400">
-              {tiktok.connectionState}
+            <span className={`px-2 py-0.5 border text-xs font-mono-tabular ${statusBadgeClass}`}>
+              {statusLabel}
             </span>
           </div>
 
@@ -102,23 +146,40 @@ export const TikTokPage: React.FC = () => {
               type="text"
               value={tiktok.username}
               onChange={(e) => updateTikTokConfig({ username: e.target.value })}
-              placeholder="e.g. nuridua.official"
+              placeholder="fcproplayer7"
               className="w-full bg-[#070E1F] border border-[#233969] px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-[#C9A45C]"
             />
           </div>
 
           <div>
             <label htmlFor="tk-endpoint" className="block text-xs text-slate-300 mb-1.5">
-              Approved Connector Relay URL (Optional)
+              External Node.js Relay Base URL (Optional — HTTP/HTTPS)
             </label>
             <input
               id="tk-endpoint"
               type="url"
               value={tiktok.connectorEndpoint}
               onChange={(e) => updateTikTokConfig({ connectorEndpoint: e.target.value })}
-              placeholder="https://your-relay.example.com/tiktok-connect"
+              placeholder="https://your-nuridua-relay.onrender.com"
               className="w-full bg-[#070E1F] border border-[#233969] px-3.5 py-2.5 text-sm font-mono text-white focus:outline-none focus:border-[#C9A45C]"
             />
+            <p className="mt-1 text-[11px] text-slate-400">
+              Leave blank to keep status as <strong>Not Configured</strong>. Compatible with the included{' '}
+              <code className="font-mono text-slate-200">relay-server/</code> blueprint.
+            </p>
+          </div>
+
+          <div className="bg-[#070E1F] border border-[#1A2B54] p-3 text-[11px] text-slate-300 space-y-1">
+            <div className="flex items-center gap-1.5 text-emerald-300 font-medium">
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+              <span>Zero-Credential Policy &amp; Streak Deduplication</span>
+            </div>
+            <p className="text-slate-400">
+              Only the public <code className="font-mono text-slate-200">@fcproplayer7</code> handle is used.
+              TikTok passwords, session cookies, or private tokens are never requested or stored. Gift streaks
+              (<code className="font-mono text-slate-200">giftType === 1 &amp;&amp; !repeatEnd</code>) are buffered
+              until completion so each streak queues one prayer with the accurate final quantity.
+            </p>
           </div>
 
           <div className="grid grid-cols-3 gap-3">
@@ -195,21 +256,33 @@ export const TikTokPage: React.FC = () => {
           <div className="flex flex-wrap items-center gap-3 pt-1">
             <button
               type="submit"
-              disabled={connecting}
-              className="inline-flex items-center gap-2 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-white text-xs font-medium px-4 py-2.5 cursor-pointer"
+              disabled={connecting || tiktok.connectionState === 'connecting'}
+              className="inline-flex items-center gap-2 bg-[#13234B] hover:bg-[#1B3166] disabled:opacity-60 border border-[#29437F] text-white text-xs font-medium px-4 py-2.5 cursor-pointer"
             >
               <PlugZap className="w-3.5 h-3.5 text-[#E5C88B]" />
-              <span>{connecting ? 'Checking Relay...' : 'Verify & Connect'}</span>
+              <span>
+                {connecting || tiktok.connectionState === 'connecting'
+                  ? 'Bağlanıyor...'
+                  : 'Verify & Connect'}
+              </span>
             </button>
 
             <button
               type="button"
-              onClick={disconnectTikTok}
+              onClick={() => void disconnectTikTok()}
               className="inline-flex items-center gap-2 bg-[#070E1F] hover:bg-[#101C3B] border border-[#233969] text-slate-300 text-xs px-4 py-2.5 cursor-pointer"
             >
               <Unplug className="w-3.5 h-3.5" />
               <span>Disconnect</span>
             </button>
+          </div>
+
+          <div className="pt-2 border-t border-[#16254A] text-[11px] text-slate-400 flex items-center justify-between">
+            <span className="inline-flex items-center gap-1.5">
+              <Server className="w-3.5 h-3.5 text-[#D4B26A]" />
+              <span>Real Gifts Recorded: {state.stats.realGifts}</span>
+            </span>
+            <span>Simulated Gifts: {state.stats.simulatedGifts}</span>
           </div>
         </form>
 

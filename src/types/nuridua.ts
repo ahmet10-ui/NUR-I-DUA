@@ -112,7 +112,12 @@ export interface VoiceSettingsConfig {
   externalEndpoint: string;
 }
 
-export type TikTokConnectionState = 'unconfigured' | 'disconnected' | 'connecting' | 'error';
+export type TikTokConnectionState =
+  | 'unconfigured'
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'error';
 
 export interface TikTokConnectionConfig {
   username: string;
@@ -124,6 +129,32 @@ export interface TikTokConnectionConfig {
   duplicateWindowSec: number;
   lastError: string | null;
   lastCheckedAt: string | null;
+  roomId?: string | null;
+  viewerCount?: number | null;
+}
+
+export interface TikTokRelayGiftPayload {
+  eventId: string;
+  streakKey: string;
+  username: string;
+  nickname?: string;
+  giftId: string;
+  giftName: string;
+  quantity: number;
+  diamondCount?: number;
+  giftType?: number;
+  repeatCount?: number;
+  repeatEnd?: boolean;
+  timestamp: string;
+}
+
+export interface TikTokConnectorStatusPayload {
+  state: TikTokConnectionState;
+  username: string;
+  roomId?: string | null;
+  viewerCount?: number | null;
+  error?: string | null;
+  updatedAt: string;
 }
 
 export interface SystemLogEntry {
@@ -232,5 +263,5 @@ export interface ITikTokGiftAdapter {
   readonly isConfigured: boolean;
   getStatus(): TikTokConnectionState;
   connect(username: string): Promise<{ ok: boolean; error?: string }>;
-  disconnect(): void;
+  disconnect(): void | Promise<void>;
 }

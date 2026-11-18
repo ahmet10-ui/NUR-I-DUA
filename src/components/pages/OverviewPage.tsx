@@ -13,6 +13,7 @@ import { PRAYER_CATEGORIES } from '../../data/defaults';
 import { useStudio } from '../../context/StudioContext';
 import { AdminSectionId } from '../../types/nuridua';
 import { browserTTSProvider } from '../../services/ttsService';
+import { getTikTokStateLabel } from '../../services/tiktokLiveConnectorService';
 
 interface OverviewPageProps {
   onNavigate: (section: AdminSectionId) => void;
@@ -205,9 +206,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-white">TikTok LIVE Connection</h2>
               <span className="text-xs font-mono-tabular text-amber-400">
-                {state.tiktok.connectionState === 'unconfigured'
-                  ? 'Not Configured'
-                  : state.tiktok.connectionState}
+                {getTikTokStateLabel(state.tiktok.connectionState)}
               </span>
             </div>
             <p className="mt-2 text-xs text-slate-400 leading-relaxed">

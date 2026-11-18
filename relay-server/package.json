@@ -1,0 +1,16 @@
+{
+  "name": "nur-i-dua-tiktok-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone free-tier Node.js relay server using tiktok-live-connector for NUR-I DUA (@fcproplayer7).",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "tiktok-live-connector": "^1.2.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -10,7 +10,7 @@ import {
   saveLocalState,
   subscribeToStudioSync,
 } from '../services/syncClient';
-import { UnconfiguredLiveTikTokAdapter } from '../services/tiktokAdapter';
+import { TikTokLiveConnectorService } from '../services/tiktokLiveConnectorService';
 import {
   AvailableVoice,
   browserTTSProvider,
@@ -82,7 +82,9 @@ interface StudioContextValue {
     source: EventSource;
     username?: string;
     giftIdOrName?: string;
+    displayGiftName?: string;
     quantity?: number;
+    externalDedupeKey?: string;
   }) => EnqueueResult;
   simulateSampleCayGift: () => EnqueueResult;
   toggleQueuePause: () => void;
@@ -106,7 +108,7 @@ interface StudioContextValue {
   ) => Promise<{ ok: boolean; message: string }>;
   updateTikTokConfig: (patch: Partial<TikTokConnectionConfig>) => void;
   attemptTikTokConnect: () => Promise<{ ok: boolean; error?: string }>;
-  disconnectTikTok: () => void;
+  disconnectTikTok: () => void | Promise<void>;
   updateBroadcastConfig: (patch: Partial<BroadcastSettingsConfig>) => void;
   addLog: (level: SystemLogEntry['level'], source: SystemLogEntry['source'], message: string) => void;
   resetAllDefaults: () => void;
@@ -165,8 +167,11 @@ function recoverInitialState(): AppState {
     tiktok: {
       ...defaults.tiktok,
       ...(saved.tiktok || {}),
+      username: sanitizeTikTokHandle(saved.tiktok?.username || '') || defaults.tiktok.username,
       // Never auto-claim connected state from stale cache
-      connectionState: saved.tiktok?.connectorEndpoint ? 'disconnected' : 'unconfigured',
+      connectionState: saved.tiktok?.connectorEndpoint?.trim() ? 'disconnected' : 'unconfigured',
+      roomId: null,
+      viewerCount: null,
     },
     broadcast: { ...defaults.broadcast, ...(saved.broadcast || {}) },
     logs: Array.isArray(saved.logs) ? saved.logs : defaults.logs,
@@ -205,6 +210,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const recentDedupeRef = useRef<Map<string, number>>(new Map());
   const holdTimeoutRef = useRef<number | null>(null);
   const lastBroadcastSyncRef = useRef<number>(0);
+  const tiktokConnectorRef = useRef<TikTokLiveConnectorService | null>(null);
 
   const unlockAudioByGesture = useCallback(() => {
     setHasUserGesture(true);
@@ -507,7 +513,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       source: EventSource;
       username?: string;
       giftIdOrName?: string;
+      displayGiftName?: string;
       quantity?: number;
+      externalDedupeKey?: string;
     }): EnqueueResult => {
       setHasUserGesture(true);
       const current = stateRef.current;
@@ -516,14 +524,25 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           ? params.username
           : SAMPLE_TIKTOK_USERNAMES[Math.floor(Math.random() * SAMPLE_TIKTOK_USERNAMES.length)];
       const safeUser = sanitizeUsername(rawUser);
-      const qty = Math.max(1, Math.min(99, Math.floor(Number(params.quantity) || 1)));
+      const qty = Math.max(1, Math.min(999, Math.floor(Number(params.quantity) || 1)));
 
-      // Identify gift
+      // Identify gift rule
       const query = (params.giftIdOrName || 'Çay').trim().toLowerCase();
-      const matchedGift =
-        current.gifts.find(
-          (g) => g.id === params.giftIdOrName || g.tiktokGiftId.toLowerCase() === query || g.name.toLowerCase() === query
-        ) || current.gifts[0];
+      const explicitMatch = current.gifts.find(
+        (g) => g.id === params.giftIdOrName || g.tiktokGiftId.toLowerCase() === query || g.name.toLowerCase() === query
+      );
+
+      let matchedGift = explicitMatch;
+      if (!matchedGift) {
+        if (params.source === 'real') {
+          matchedGift =
+            current.gifts.find((g) => g.enabled && g.category === 'general_blessings') ||
+            current.gifts.find((g) => g.enabled) ||
+            current.gifts[0];
+        } else {
+          matchedGift = current.gifts[0];
+        }
+      }
 
       if (!matchedGift) {
         appendLog('warning', 'queue', 'No gift rules configured.');
@@ -535,23 +554,39 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         return { ok: false, reason: `Gift rule "${matchedGift.name}" is disabled.` };
       }
 
-      // Duplicate protection window
-      const dedupeKey = `${params.source}:${safeUser.toLowerCase()}:${matchedGift.id}:${qty}`;
+      const effectiveGiftName = params.displayGiftName
+        ? sanitizeGiftName(params.displayGiftName) || matchedGift.name
+        : explicitMatch
+        ? matchedGift.name
+        : sanitizeGiftName(params.giftIdOrName || matchedGift.name) || matchedGift.name;
+
+      // Duplicate protection window (real streams also pass unique streakKey so distinct combos are never dropped)
+      const dedupeKey = params.externalDedupeKey
+        ? `${params.source}:${params.externalDedupeKey}`
+        : `${params.source}:${safeUser.toLowerCase()}:${matchedGift.id}:${qty}`;
       const nowMs = Date.now();
-      const windowMs = Math.max(2, current.tiktok.duplicateWindowSec) * 1000;
+      const windowMs = params.externalDedupeKey
+        ? 120_000
+        : Math.max(2, current.tiktok.duplicateWindowSec) * 1000;
       const lastSeen = recentDedupeRef.current.get(dedupeKey);
       if (lastSeen && nowMs - lastSeen < windowMs) {
         appendLog(
           'warning',
           'queue',
-          `Duplicate event prevented for @${safeUser} (${matchedGift.name} x${qty}) within ${current.tiktok.duplicateWindowSec}s window.`
+          `Duplicate event prevented for @${safeUser} (${effectiveGiftName} x${qty}).`
         );
         return {
           ok: false,
-          reason: `Duplicate gift from @${safeUser} blocked within ${current.tiktok.duplicateWindowSec}s cooldown.`,
+          reason: `Duplicate gift from @${safeUser} blocked.`,
         };
       }
       recentDedupeRef.current.set(dedupeKey, nowMs);
+      if (recentDedupeRef.current.size > 500) {
+        const cutoff = nowMs - 120_000;
+        for (const [k, ts] of recentDedupeRef.current.entries()) {
+          if (ts < cutoff) recentDedupeRef.current.delete(k);
+        }
+      }
 
       const selectedPrayer = pickRandomPrayer(matchedGift.category);
       if (!selectedPrayer) {
@@ -571,9 +606,15 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         chosenScholar = refSpeaker === 'scholar_1' ? 'scholar_2' : 'scholar_1';
       }
 
-      const repeatCount = matchedGift.repeatPerQuantity
-        ? Math.min(5, qty * matchedGift.quantityMultiplier)
-        : 1;
+      // Real finalized streaks should produce 1 prayer with accurate final quantity unless an explicit rule repeats
+      const repeatCount =
+        params.source === 'real'
+          ? explicitMatch?.repeatPerQuantity
+            ? Math.min(5, qty * matchedGift.quantityMultiplier)
+            : 1
+          : matchedGift.repeatPerQuantity
+          ? Math.min(5, qty * matchedGift.quantityMultiplier)
+          : 1;
 
       const createdEvents: QueueEvent[] = [];
       for (let i = 0; i < repeatCount; i++) {
@@ -584,7 +625,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           username: safeUser,
           displayUsername: `@${safeUser}`,
           giftId: matchedGift.id,
-          giftName: matchedGift.name,
+          giftName: effectiveGiftName,
           quantity: qty,
           priority: matchedGift.priority,
           category: selectedPrayer.category,
@@ -627,7 +668,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       appendLog(
         'info',
         'queue',
-        `[${params.source.toUpperCase()}] Queued ${matchedGift.name} x${qty} from @${safeUser} (${catLabel}).`
+        `[${params.source.toUpperCase()}] Queued ${effectiveGiftName} x${qty} from @${safeUser} (${catLabel}).`
       );
 
       return { ok: true, event: createdEvents[0] };
@@ -1108,12 +1149,65 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     [appendLog, emitMouthLevel]
   );
 
+  // Persistent TikTokLiveConnectorService lifecycle (Admin view only)
+  useEffect(() => {
+    if (isBroadcastView) return;
+
+    const connector = new TikTokLiveConnectorService(stateRef.current.tiktok, {
+      onStatusChange: (payload) => {
+        setState((prev) => ({
+          ...prev,
+          tiktok: {
+            ...prev.tiktok,
+            connectionState: payload.state,
+            roomId: payload.roomId !== undefined ? payload.roomId : prev.tiktok.roomId,
+            viewerCount: payload.viewerCount !== undefined ? payload.viewerCount : prev.tiktok.viewerCount,
+            lastError: payload.error !== undefined ? payload.error : prev.tiktok.lastError,
+            lastCheckedAt: payload.updatedAt,
+          },
+        }));
+      },
+      onFinalizedGift: (gift) => {
+        enqueueGiftEvent({
+          source: 'real',
+          username: gift.username,
+          giftIdOrName: gift.giftName || gift.giftId,
+          displayGiftName: gift.giftName,
+          quantity: gift.quantity,
+          externalDedupeKey: gift.streakKey,
+        });
+      },
+      onLog: (level, message) => {
+        appendLog(level, 'tiktok', message);
+      },
+    });
+
+    tiktokConnectorRef.current = connector;
+    return () => {
+      connector.dispose();
+      if (tiktokConnectorRef.current === connector) {
+        tiktokConnectorRef.current = null;
+      }
+    };
+  }, [isBroadcastView, enqueueGiftEvent, appendLog]);
+
+  useEffect(() => {
+    if (isBroadcastView) return;
+    tiktokConnectorRef.current?.updateConfig(state.tiktok);
+  }, [isBroadcastView, state.tiktok]);
+
   const updateTikTokConfig = useCallback((patch: Partial<TikTokConnectionConfig>) => {
     setState((prev) => {
       const nextEndpoint =
         patch.connectorEndpoint !== undefined ? patch.connectorEndpoint.trim() : prev.tiktok.connectorEndpoint;
       const nextUsername =
         patch.username !== undefined ? sanitizeTikTokHandle(patch.username) : prev.tiktok.username;
+      const nextState =
+        !nextEndpoint
+          ? 'unconfigured'
+          : prev.tiktok.connectionState === 'unconfigured'
+          ? 'disconnected'
+          : prev.tiktok.connectionState;
       return {
         ...prev,
         tiktok: {
@@ -1121,7 +1215,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           ...patch,
           username: nextUsername,
           connectorEndpoint: nextEndpoint,
-          connectionState: nextEndpoint ? prev.tiktok.connectionState : 'unconfigured',
+          connectionState: nextState,
         },
         lastUpdatedAt: new Date().toISOString(),
       };
@@ -1130,36 +1224,50 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
 
   const attemptTikTokConnect = useCallback(async () => {
     const tk = stateRef.current.tiktok;
-    const adapter = new UnconfiguredLiveTikTokAdapter(tk.connectorEndpoint);
-    setState((prev) => ({
-      ...prev,
-      tiktok: { ...prev.tiktok, connectionState: 'connecting', lastCheckedAt: new Date().toISOString() },
-    }));
-    const result = await adapter.connect(tk.username);
-    setState((prev) => ({
-      ...prev,
-      tiktok: {
-        ...prev.tiktok,
-        connectionState: adapter.getStatus(),
-        lastError: result.error || null,
-        lastCheckedAt: new Date().toISOString(),
-      },
-    }));
+    const connector =
+      tiktokConnectorRef.current ||
+      new TikTokLiveConnectorService(tk, {
+        onFinalizedGift: (gift) => {
+          enqueueGiftEvent({
+            source: 'real',
+            username: gift.username,
+            giftIdOrName: gift.giftName || gift.giftId,
+            displayGiftName: gift.giftName,
+            quantity: gift.quantity,
+            externalDedupeKey: gift.streakKey,
+          });
+        },
+        onLog: (level, message) => appendLog(level, 'tiktok', message),
+      });
+
+    if (!tiktokConnectorRef.current) {
+      tiktokConnectorRef.current = connector;
+    }
+
+    connector.updateConfig(tk);
+    const result = await connector.connect(tk.username);
     if (!result.ok && result.error) {
       appendLog('warning', 'tiktok', result.error);
     }
     return result;
-  }, [appendLog]);
+  }, [appendLog, enqueueGiftEvent]);
 
-  const disconnectTikTok = useCallback(() => {
-    setState((prev) => ({
-      ...prev,
-      tiktok: {
-        ...prev.tiktok,
-        connectionState: prev.tiktok.connectorEndpoint ? 'disconnected' : 'unconfigured',
-        lastError: null,
-      },
-    }));
+  const disconnectTikTok = useCallback(async () => {
+    const connector = tiktokConnectorRef.current;
+    if (connector) {
+      await connector.disconnect();
+    } else {
+      setState((prev) => ({
+        ...prev,
+        tiktok: {
+          ...prev.tiktok,
+          connectionState: prev.tiktok.connectorEndpoint ? 'disconnected' : 'unconfigured',
+          roomId: null,
+          viewerCount: null,
+          lastError: null,
+        },
+      }));
+    }
     appendLog('info', 'tiktok', 'TikTok LIVE connector disconnected.');
   }, [appendLog]);
 

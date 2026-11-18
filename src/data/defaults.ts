@@ -227,7 +227,7 @@ export const createDefaultAppState = (): AppState => ({
     externalEndpoint: '',
   },
   tiktok: {
-    username: '',
+    username: 'fcproplayer7',
     connectionState: 'unconfigured',
     connectorEndpoint: '',
     autoReconnect: true,
@@ -236,6 +236,8 @@ export const createDefaultAppState = (): AppState => ({
     duplicateWindowSec: 8,
     lastError: null,
     lastCheckedAt: null,
+    roomId: null,
+    viewerCount: null,
   },
   broadcast: {
     studioTitle: 'NUR-I DUA',

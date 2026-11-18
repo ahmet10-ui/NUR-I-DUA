@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { StudioProvider, useStudio } from './context/StudioContext';
 import { AdminSectionId } from './types/nuridua';
+import { getTikTokStateLabel } from './services/tiktokLiveConnectorService';
 import { Logo } from './components/Logo';
 import { LoginScreen } from './components/LoginScreen';
 import { BroadcastView } from './components/BroadcastView';
@@ -196,7 +197,7 @@ const AdminShell: React.FC<{
           <div className="flex items-center justify-between text-slate-400">
             <span>TikTok LIVE</span>
             <span className="text-amber-400 font-mono-tabular">
-              {state.tiktok.connectionState === 'unconfigured' ? 'Unconfigured' : state.tiktok.connectionState}
+              {getTikTokStateLabel(state.tiktok.connectionState)}
             </span>
           </div>
           <div className="flex items-center justify-between text-slate-400">

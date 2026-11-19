@@ -16,6 +16,7 @@ import {
   browserTTSProvider,
   getAvailableSpeechVoices,
   getScholarProsody,
+  resolveScholarVoiceURI,
   serverNeuralTTSProvider,
   studioTTSRouter,
 } from '../services/ttsService';
@@ -725,15 +726,16 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     });
 
     const voiceCfg = stateRef.current.voice;
-    const chosenVoiceURI =
-      startedEvent.scholarId === 'scholar_2' && voiceCfg.scholar2VoiceURI
-        ? voiceCfg.scholar2VoiceURI
-        : voiceCfg.selectedVoiceURI;
+    const chosenVoiceURI = resolveScholarVoiceURI(voiceCfg, startedEvent.scholarId);
     const chosenNeuralVoiceId =
       startedEvent.scholarId === 'scholar_2' && voiceCfg.neuralScholar2VoiceId
         ? voiceCfg.neuralScholar2VoiceId
         : voiceCfg.neuralVoiceId;
-    const prosody = getScholarProsody(voiceCfg.rate, voiceCfg.pitch, startedEvent.scholarId);
+    const prosody = getScholarProsody(voiceCfg.rate, voiceCfg.pitch, startedEvent.scholarId, {
+      enabled: voiceCfg.scholar1IndependentEnabled,
+      rate: voiceCfg.scholar1Rate,
+      pitch: voiceCfg.scholar1Pitch,
+    });
 
     setLastSpeechError(null);
     studioTTSRouter.speak(startedEvent.renderedPrayer, {
@@ -996,15 +998,16 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       setHasUserGesture(true);
       if (activeEventRef.current) return; // Don't clobber active queue playback
       const voiceCfg = stateRef.current.voice;
-      const chosenVoiceURI =
-        scholarId === 'scholar_2' && voiceCfg.scholar2VoiceURI
-          ? voiceCfg.scholar2VoiceURI
-          : voiceCfg.selectedVoiceURI;
+      const chosenVoiceURI = resolveScholarVoiceURI(voiceCfg, scholarId);
       const chosenNeuralVoiceId =
         scholarId === 'scholar_2' && voiceCfg.neuralScholar2VoiceId
           ? voiceCfg.neuralScholar2VoiceId
           : voiceCfg.neuralVoiceId;
-      const prosody = getScholarProsody(voiceCfg.rate, voiceCfg.pitch, scholarId);
+      const prosody = getScholarProsody(voiceCfg.rate, voiceCfg.pitch, scholarId, {
+        enabled: voiceCfg.scholar1IndependentEnabled,
+        rate: voiceCfg.scholar1Rate,
+        pitch: voiceCfg.scholar1Pitch,
+      });
 
       setLastSpeechError(null);
       setState((prev) => ({
@@ -1047,11 +1050,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       setHasUserGesture(true);
       if (activeEventRef.current) return;
       const voiceCfg = stateRef.current.voice;
-      const chosenVoiceURI =
-        scholarId === 'scholar_2' && voiceCfg.scholar2VoiceURI
-          ? voiceCfg.scholar2VoiceURI
-          : voiceCfg.selectedVoiceURI;
-      const prosody = getScholarProsody(voiceCfg.rate, voiceCfg.pitch, scholarId);
+      const chosenVoiceURI = resolveScholarVoiceURI(voiceCfg, scholarId);
+      const prosody = getScholarProsody(voiceCfg.rate, voiceCfg.pitch, scholarId, {
+        enabled: voiceCfg.scholar1IndependentEnabled,
+        rate: voiceCfg.scholar1Rate,
+        pitch: voiceCfg.scholar1Pitch,
+      });
 
       studioTTSRouter.stop();
       setLastSpeechError(null);
@@ -1155,17 +1159,31 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
 
     const connector = new TikTokLiveConnectorService(stateRef.current.tiktok, {
       onStatusChange: (payload) => {
-        setState((prev) => ({
-          ...prev,
-          tiktok: {
-            ...prev.tiktok,
-            connectionState: payload.state,
-            roomId: payload.roomId !== undefined ? payload.roomId : prev.tiktok.roomId,
-            viewerCount: payload.viewerCount !== undefined ? payload.viewerCount : prev.tiktok.viewerCount,
-            lastError: payload.error !== undefined ? payload.error : prev.tiktok.lastError,
-            lastCheckedAt: payload.updatedAt,
-          },
-        }));
+        setState((prev) => {
+          const nextRoomId = payload.roomId !== undefined ? payload.roomId : prev.tiktok.roomId;
+          const nextViewerCount =
+            payload.viewerCount !== undefined ? payload.viewerCount : prev.tiktok.viewerCount;
+          const nextError = payload.error !== undefined ? payload.error : prev.tiktok.lastError;
+          if (
+            prev.tiktok.connectionState === payload.state &&
+            prev.tiktok.roomId === nextRoomId &&
+            prev.tiktok.viewerCount === nextViewerCount &&
+            prev.tiktok.lastError === nextError
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            tiktok: {
+              ...prev.tiktok,
+              connectionState: payload.state,
+              roomId: nextRoomId,
+              viewerCount: nextViewerCount,
+              lastError: nextError,
+              lastCheckedAt: payload.updatedAt,
+            },
+          };
+        });
       },
       onFinalizedGift: (gift) => {
         enqueueGiftEvent({
@@ -1193,8 +1211,23 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
 
   useEffect(() => {
     if (isBroadcastView) return;
-    tiktokConnectorRef.current?.updateConfig(state.tiktok);
-  }, [isBroadcastView, state.tiktok]);
+    tiktokConnectorRef.current?.updateConfig({
+      username: state.tiktok.username,
+      connectorEndpoint: state.tiktok.connectorEndpoint,
+      autoReconnect: state.tiktok.autoReconnect,
+      maxRetries: state.tiktok.maxRetries,
+      retryDelaySec: state.tiktok.retryDelaySec,
+      duplicateWindowSec: state.tiktok.duplicateWindowSec,
+    });
+  }, [
+    isBroadcastView,
+    state.tiktok.username,
+    state.tiktok.connectorEndpoint,
+    state.tiktok.autoReconnect,
+    state.tiktok.maxRetries,
+    state.tiktok.retryDelaySec,
+    state.tiktok.duplicateWindowSec,
+  ]);
 
   const updateTikTokConfig = useCallback((patch: Partial<TikTokConnectionConfig>) => {
     setState((prev) => {

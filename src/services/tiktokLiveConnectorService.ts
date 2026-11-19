@@ -113,7 +113,12 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
 
   updateConfig(next: Partial<TikTokConnectionConfig>): void {
     this.config = { ...this.config, ...next };
-    if (!this.isConfigured && this.status !== 'connected' && this.status !== 'connecting') {
+    if (
+      !this.isConfigured &&
+      this.status !== 'connected' &&
+      this.status !== 'connecting' &&
+      this.status !== 'unconfigured'
+    ) {
       this.emitStatus('unconfigured', null);
     } else if (this.isConfigured && this.status === 'unconfigured') {
       this.emitStatus('disconnected', null);

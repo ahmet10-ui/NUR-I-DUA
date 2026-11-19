@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
+import mosqueMasterUrl from '../assets/images/mosque_scholars_broadcast_1795080562181.jpg';
 import { useStudio } from '../context/StudioContext';
-import { CameraPreset, MosqueSceneController } from '../three/MosqueScene';
+import { CameraPreset, PhotorealisticMosqueStage } from '../scene/PhotorealisticMosqueStage';
 
 interface MosqueViewportProps {
   cameraPreset?: CameraPreset;
@@ -13,8 +14,8 @@ export const MosqueViewport: React.FC<MosqueViewportProps> = ({
 }) => {
   const { state, activeEvent, speakingState, subscribeMouthLevel } = useStudio();
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const controllerRef = useRef<MosqueSceneController | null>(null);
-  const [webglError, setWebglError] = useState(false);
+  const stageRef = useRef<PhotorealisticMosqueStage | null>(null);
+  const [useStaticFallback, setUseStaticFallback] = useState(false);
 
   const activeScholar = activeEvent?.scholarId || state.scholars.currentSpeaker;
   const isSpeaking = speakingState === 'speaking';
@@ -33,17 +34,17 @@ export const MosqueViewport: React.FC<MosqueViewportProps> = ({
     if (!el) return;
 
     try {
-      const controller = new MosqueSceneController({
+      const stage = new PhotorealisticMosqueStage({
         container: el,
         scholarsConfig: state.scholars,
         cameraPreset: effectivePreset,
-        onWebGLContextLost: () => setWebglError(true),
+        onFallbackReady: () => setUseStaticFallback(true),
       });
-      controllerRef.current = controller;
+      stageRef.current = stage;
 
       const unsubMouth = subscribeMouthLevel((lvl) => {
         latestRef.current.mouthLevel = lvl;
-        controller.setPlaybackState({
+        stage.setPlaybackState({
           activeScholar: latestRef.current.activeScholar,
           isSpeaking: latestRef.current.isSpeaking,
           mouthLevel: lvl,
@@ -52,26 +53,26 @@ export const MosqueViewport: React.FC<MosqueViewportProps> = ({
 
       return () => {
         unsubMouth();
-        controller.dispose();
-        controllerRef.current = null;
+        stage.dispose();
+        stageRef.current = null;
       };
     } catch {
-      setWebglError(true);
+      setUseStaticFallback(true);
     }
-    // Mount WebGL canvas once per component lifecycle
+    // Mount GPU photorealistic stage once per component lifecycle
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    controllerRef.current?.updateScholarsConfig(state.scholars);
+    stageRef.current?.updateScholarsConfig(state.scholars);
   }, [state.scholars]);
 
   useEffect(() => {
-    controllerRef.current?.setCameraPreset(effectivePreset);
+    stageRef.current?.setCameraPreset(effectivePreset);
   }, [effectivePreset]);
 
   useEffect(() => {
-    controllerRef.current?.setPlaybackState({
+    stageRef.current?.setPlaybackState({
       activeScholar,
       isSpeaking,
       mouthLevel: isSpeaking ? latestRef.current.mouthLevel : 0,
@@ -81,12 +82,22 @@ export const MosqueViewport: React.FC<MosqueViewportProps> = ({
   return (
     <div className={`relative w-full h-full overflow-hidden bg-[#070E21] ${className}`}>
       <div ref={mountRef} className="w-full h-full" />
-      {webglError && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-[#09122A]">
-          <p className="font-display text-2xl text-[#E5C88B]">3D Viewport Unavailable</p>
-          <p className="mt-2 max-w-sm text-sm text-slate-300">
-            WebGL context could not be initialized on this device. Audio playback and prayer overlays continue normally.
-          </p>
+      {useStaticFallback && (
+        <div className="absolute inset-0 overflow-hidden bg-[#09122A]">
+          <img
+            src={mosqueMasterUrl}
+            alt="Traditional Turkish mosque broadcast scene with two elderly scholars"
+            referrerPolicy="no-referrer"
+            className={`w-full h-full object-cover transition-transform duration-700 ${
+              effectivePreset === 'scholar_closeup'
+                ? activeScholar === 'scholar_1'
+                  ? 'scale-[1.28] translate-x-[10%]'
+                  : 'scale-[1.28] -translate-x-[10%]'
+                : effectivePreset === 'broadcast_portrait'
+                ? 'scale-[1.06]'
+                : 'scale-100'
+            }`}
+          />
         </div>
       )}
     </div>

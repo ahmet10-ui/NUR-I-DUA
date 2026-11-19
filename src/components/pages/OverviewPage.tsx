@@ -113,7 +113,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
             Broadcast Overview
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            Real-time queue telemetry, digital scholar status, and separate simulation controls.
+            Real-time queue telemetry, broadcast scholar status, and separate simulation controls.
           </p>
         </div>
 

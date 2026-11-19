@@ -38,6 +38,7 @@ public class NurIDuaTtsPlugin extends Plugin {
     private volatile float lastPitch = 0.84f;
     private volatile float lastVolume = 0.95f;
     private volatile String lastVoiceName = null;
+    private volatile boolean customVoiceApplied = false;
     private volatile int pauseBaseOffset = 0;
     private volatile int lastRangeStart = 0;
     private volatile boolean isPausedState = false;
@@ -428,6 +429,7 @@ public class NurIDuaTtsPlugin extends Plugin {
                         for (Voice v : voices) {
                             if (v != null && voiceName.equals(v.getName())) {
                                 tts.setVoice(v);
+                                customVoiceApplied = true;
                                 break;
                             }
                         }
@@ -435,6 +437,16 @@ public class NurIDuaTtsPlugin extends Plugin {
                 } catch (Exception ignored) {
                     // Keep default engine voice if explicit voice lookup fails
                 }
+            } else if (customVoiceApplied) {
+                try {
+                    Voice defaultVoice = tts.getDefaultVoice();
+                    if (defaultVoice != null) {
+                        tts.setVoice(defaultVoice);
+                    }
+                } catch (Exception ignored) {
+                    // Ignore if engine does not expose getDefaultVoice()
+                }
+                customVoiceApplied = false;
             }
 
             tts.setSpeechRate(rate);

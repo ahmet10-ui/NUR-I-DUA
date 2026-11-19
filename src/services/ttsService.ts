@@ -4,6 +4,7 @@ import {
   ScholarId,
   TTSProviderType,
   TTSSpeakOptions,
+  VoiceSettingsConfig,
 } from '../types/nuridua';
 import {
   isNativeTtsPluginAvailable,
@@ -209,16 +210,43 @@ export function resolveTurkishSystemVoice(
 }
 
 /**
- * Computes effective rate and pitch per scholar so the two scholars remain audibly distinct
- * using only real SpeechSynthesis prosody parameters (never fake voice IDs).
+ * Resolves the effective voiceURI for each scholar.
+ * Hacı Mehmet Efendi (scholar_2) keeps his exact existing resolution (`scholar2VoiceURI || selectedVoiceURI`).
+ * Hacı Ahmet Efendi (scholar_1) can optionally use his own independent `scholar1VoiceURI`.
+ */
+export function resolveScholarVoiceURI(
+  voiceCfg: Pick<
+    VoiceSettingsConfig,
+    'selectedVoiceURI' | 'scholar2VoiceURI' | 'scholar1IndependentEnabled' | 'scholar1VoiceURI'
+  >,
+  scholarId: ScholarId
+): string {
+  if (scholarId === 'scholar_2') {
+    return voiceCfg.scholar2VoiceURI || voiceCfg.selectedVoiceURI;
+  }
+  if (voiceCfg.scholar1IndependentEnabled !== false && voiceCfg.scholar1VoiceURI) {
+    return voiceCfg.scholar1VoiceURI;
+  }
+  return voiceCfg.selectedVoiceURI;
+}
+
+/**
+ * Computes effective rate and pitch per scholar so Hacı Ahmet Efendi (scholar_1)
+ * uses his own deeper, slower, solemn elderly profile while Hacı Mehmet Efendi (scholar_2)
+ * preserves his exact existing rate and pitch untouched.
  */
 export function getScholarProsody(
   baseRate: number,
   basePitch: number,
-  scholarId: ScholarId
+  scholarId: ScholarId,
+  scholar1Profile?: {
+    enabled?: boolean;
+    rate?: number;
+    pitch?: number;
+  }
 ): { rate: number; pitch: number } {
-  const clampRate = (v: number) => Math.min(1.4, Math.max(0.55, Number(v.toFixed(2))));
-  const clampPitch = (v: number) => Math.min(1.4, Math.max(0.6, Number(v.toFixed(2))));
+  const clampRate = (v: number) => Math.min(1.4, Math.max(0.5, Number(v.toFixed(2))));
+  const clampPitch = (v: number) => Math.min(1.4, Math.max(0.5, Number(v.toFixed(2))));
 
   if (scholarId === 'scholar_2') {
     return {
@@ -226,6 +254,14 @@ export function getScholarProsody(
       pitch: clampPitch(basePitch - 0.05),
     };
   }
+
+  if (scholarId === 'scholar_1' && scholar1Profile?.enabled !== false) {
+    return {
+      rate: clampRate(scholar1Profile?.rate ?? 0.76),
+      pitch: clampPitch(scholar1Profile?.pitch ?? 0.68),
+    };
+  }
+
   return {
     rate: clampRate(baseRate),
     pitch: clampPitch(basePitch),
@@ -411,8 +447,8 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
       // Keep reference on instance so Chrome/Android GC cannot drop the utterance and lose `onend`
       this.activeUtterance = utterance;
       utterance.lang = options.lang || 'tr-TR';
-      utterance.rate = Math.min(1.4, Math.max(0.55, options.rate));
-      utterance.pitch = Math.min(1.4, Math.max(0.6, options.pitch));
+      utterance.rate = Math.min(1.4, Math.max(0.5, options.rate));
+      utterance.pitch = Math.min(1.4, Math.max(0.5, options.pitch));
       utterance.volume = Math.min(1, Math.max(0, options.volume));
 
       if (resolved.voice) {

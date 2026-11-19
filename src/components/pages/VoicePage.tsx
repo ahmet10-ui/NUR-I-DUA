@@ -16,6 +16,7 @@ import { useStudio } from '../../context/StudioContext';
 import {
   fetchServerTTSStatus,
   getScholarProsody,
+  resolveScholarVoiceURI,
   resolveTurkishSystemVoice,
   ServerTTSStatusResponse,
 } from '../../services/ttsService';
@@ -23,6 +24,24 @@ import {
   AndroidTTSEngineStatus,
   getEngineInfo as getNativeAndroidEngineInfo,
 } from '../../services/nativeAndroidTtsBridge';
+import {
+  cancelSeslenDownload,
+  downloadSeslenModel,
+  getSeslenStatus,
+  playOfficialHasanSample,
+  replayLastSeslenWav,
+  SeslenContractVerificationResult,
+  SeslenDownloadProgressEvent,
+  SeslenIntegrityResult,
+  SeslenPcmStats,
+  SeslenSpeakTestResult,
+  SeslenStatusResult,
+  speakSeslenTest,
+  stopSeslenTest,
+  subscribeSeslenEvents,
+  verifySeslenContract,
+  verifySeslenModelIntegrity,
+} from '../../services/nativeSeslenTtsBridge';
 import { NeuralTTSProviderId, ScholarId, TTSProviderType } from '../../types/nuridua';
 
 interface RawVoiceDiagnosticItem {
@@ -90,11 +109,36 @@ export const VoicePage: React.FC = () => {
   const [nativeStatus, setNativeStatus] = useState<AndroidTTSEngineStatus | null>(null);
   const [nativeLoading, setNativeLoading] = useState<boolean>(false);
 
+  // Isolated Seslen-TTS Hasan (Hacı Ahmet Efendi ONLY) state — Stage 1-4 verification/test
+  const [seslenStatus, setSeslenStatus] = useState<SeslenStatusResult | null>(null);
+  const [seslenProgress, setSeslenProgress] = useState<SeslenDownloadProgressEvent | null>(null);
+  const [seslenError, setSeslenError] = useState<string | null>(null);
+  const [seslenIntegrity, setSeslenIntegrity] = useState<SeslenIntegrityResult | null>(null);
+  const [seslenIntegrityLoading, setSeslenIntegrityLoading] = useState(false);
+  const [seslenContract, setSeslenContract] = useState<SeslenContractVerificationResult | null>(null);
+  const [seslenContractLoading, setSeslenContractLoading] = useState(false);
+  const [seslenTestSentence, setSeslenTestSentence] = useState(
+    'Esselâmü aleyküm. Allah dualarımızı kabul eylesin.'
+  );
+  const [seslenRate, setSeslenRate] = useState(0.94);
+  const [seslenSpeaking, setSeslenSpeaking] = useState(false);
+  const [seslenMouthLevel, setSeslenMouthLevel] = useState(0);
+  const [seslenTestResult, setSeslenTestResult] = useState<SeslenSpeakTestResult | null>(null);
+  const [seslenOfficialStats, setSeslenOfficialStats] = useState<SeslenPcmStats | null>(null);
+  const [seslenLogs, setSeslenLogs] = useState<string[]>([]);
+
   const loadNativeAndroidStatus = useCallback(async () => {
     setNativeLoading(true);
     try {
-      const info = await getNativeAndroidEngineInfo();
+      const [info, seslen] = await Promise.all([
+        getNativeAndroidEngineInfo(),
+        getSeslenStatus(),
+      ]);
       setNativeStatus(info);
+      setSeslenStatus(seslen);
+      if (seslen.logs && seslen.logs.length > 0) {
+        setSeslenLogs(seslen.logs);
+      }
     } finally {
       setNativeLoading(false);
     }
@@ -103,6 +147,151 @@ export const VoicePage: React.FC = () => {
   useEffect(() => {
     void loadNativeAndroidStatus();
   }, [loadNativeAndroidStatus]);
+
+  useEffect(() => {
+    let unsub: (() => void) | null = null;
+    void subscribeSeslenEvents({
+      onDownloadProgress: (ev) => {
+        setSeslenProgress(ev);
+        setSeslenError(null);
+      },
+      onDownloadError: (ev) => {
+        setSeslenError(ev.message);
+        void getSeslenStatus().then(setSeslenStatus);
+      },
+      onStart: () => {
+        setSeslenSpeaking(true);
+      },
+      onMouth: (ev) => {
+        setSeslenMouthLevel(ev.level);
+      },
+      onLog: (ev) => {
+        setSeslenLogs((prev) => [...prev.slice(-79), ev.line]);
+      },
+      onDone: (ev) => {
+        setSeslenSpeaking(false);
+        setSeslenMouthLevel(0);
+        setSeslenTestResult(ev);
+        if (ev.logs) setSeslenLogs(ev.logs);
+      },
+      onError: (ev) => {
+        setSeslenSpeaking(false);
+        setSeslenMouthLevel(0);
+        setSeslenError(ev.message);
+      },
+    }).then((fn) => {
+      unsub = fn;
+    });
+    return () => {
+      unsub?.();
+    };
+  }, []);
+
+  const handleStartSeslenDownload = async () => {
+    setSeslenError(null);
+    setSeslenIntegrity(null);
+    const res = await downloadSeslenModel();
+    if (!res.ok && res.error) {
+      setSeslenError(res.error);
+    }
+    const updated = await getSeslenStatus();
+    setSeslenStatus(updated);
+    if (updated.logs) setSeslenLogs(updated.logs);
+  };
+
+  const handleVerifySeslenIntegrity = async () => {
+    setSeslenIntegrityLoading(true);
+    setSeslenError(null);
+    try {
+      const res = await verifySeslenModelIntegrity();
+      setSeslenIntegrity(res);
+      if (res.logs) setSeslenLogs(res.logs);
+      if (!res.ok && res.error) {
+        setSeslenError(res.error);
+      }
+    } finally {
+      setSeslenIntegrityLoading(false);
+    }
+  };
+
+  const handleVerifySeslenContract = async () => {
+    setSeslenContractLoading(true);
+    setSeslenError(null);
+    try {
+      const res = await verifySeslenContract(seslenTestSentence);
+      setSeslenContract(res);
+      if (res.logs) setSeslenLogs(res.logs);
+      if (!res.ok && res.error) {
+        setSeslenError(res.error);
+      }
+      const updated = await getSeslenStatus();
+      setSeslenStatus(updated);
+    } finally {
+      setSeslenContractLoading(false);
+    }
+  };
+
+  const handleSpeakSeslenTest = async () => {
+    setSeslenError(null);
+    setSeslenTestResult(null);
+    setSeslenSpeaking(true);
+    try {
+      const res = await speakSeslenTest({
+        text: seslenTestSentence,
+        rate: seslenRate,
+        volume: voice.volume,
+      });
+      setSeslenTestResult(res);
+      if (res.logs) setSeslenLogs(res.logs);
+      if (!res.ok && res.error && !res.cancelled) {
+        setSeslenError(res.error);
+      }
+      const updated = await getSeslenStatus();
+      setSeslenStatus(updated);
+    } finally {
+      setSeslenSpeaking(false);
+      setSeslenMouthLevel(0);
+    }
+  };
+
+  const handleReplayLastSeslenWav = async () => {
+    setSeslenError(null);
+    setSeslenSpeaking(true);
+    try {
+      const res = await replayLastSeslenWav(voice.volume);
+      if (res.logs) setSeslenLogs(res.logs);
+      if (!res.ok && res.error) {
+        setSeslenError(res.error);
+      }
+    } finally {
+      setSeslenSpeaking(false);
+      setSeslenMouthLevel(0);
+    }
+  };
+
+  const handlePlayOfficialHasanSample = async () => {
+    setSeslenError(null);
+    setSeslenSpeaking(true);
+    try {
+      const res = await playOfficialHasanSample(voice.volume);
+      if (res.officialSampleStats) {
+        setSeslenOfficialStats(res.officialSampleStats);
+      }
+      if (res.logs) setSeslenLogs(res.logs);
+      if (!res.ok && res.error) {
+        setSeslenError(res.error);
+      }
+    } finally {
+      setSeslenSpeaking(false);
+      setSeslenMouthLevel(0);
+    }
+  };
+
+  const handleStopSeslenTest = async () => {
+    await stopSeslenTest();
+    setSeslenSpeaking(false);
+    setSeslenMouthLevel(0);
+  };
 
   const inspectBrowserVoices = useCallback(
     (triggerLabel: string) => {
@@ -186,18 +375,23 @@ export const VoicePage: React.FC = () => {
     // Re-evaluate whenever availableVoices updates via voiceschanged
   }, [availableVoices]);
 
+  const scholar1EffectiveURI = resolveScholarVoiceURI(voice, 'scholar_1');
   const scholar1Resolved = useMemo(
-    () => resolveTurkishSystemVoice(rawSpeechVoices, voice.selectedVoiceURI, voice.language || 'tr-TR'),
-    [rawSpeechVoices, voice.selectedVoiceURI, voice.language]
+    () => resolveTurkishSystemVoice(rawSpeechVoices, scholar1EffectiveURI, voice.language || 'tr-TR'),
+    [rawSpeechVoices, scholar1EffectiveURI, voice.language]
   );
 
-  const scholar2EffectiveURI = voice.scholar2VoiceURI || voice.selectedVoiceURI;
+  const scholar2EffectiveURI = resolveScholarVoiceURI(voice, 'scholar_2');
   const scholar2Resolved = useMemo(
     () => resolveTurkishSystemVoice(rawSpeechVoices, scholar2EffectiveURI, voice.language || 'tr-TR'),
     [rawSpeechVoices, scholar2EffectiveURI, voice.language]
   );
 
-  const scholar1Prosody = getScholarProsody(voice.rate, voice.pitch, 'scholar_1');
+  const scholar1Prosody = getScholarProsody(voice.rate, voice.pitch, 'scholar_1', {
+    enabled: voice.scholar1IndependentEnabled,
+    rate: voice.scholar1Rate,
+    pitch: voice.scholar1Pitch,
+  });
   const scholar2Prosody = getScholarProsody(voice.rate, voice.pitch, 'scholar_2');
 
   const turkishVoices = availableVoices.filter((v) => v.isTurkish);
@@ -224,6 +418,9 @@ export const VoicePage: React.FC = () => {
       rate: 0.86,
       pitch: 0.84,
       volume: 0.95,
+      scholar1IndependentEnabled: true,
+      scholar1Rate: 0.76,
+      scholar1Pitch: 0.68,
     });
   };
 
@@ -500,6 +697,439 @@ export const VoicePage: React.FC = () => {
             </div>
           </div>
 
+          {/* Independent Voice Profile ONLY for Hacı Ahmet Efendi */}
+          <div className="bg-[#0B142B] border border-[#C9A45C]/45 p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.14em] text-[#D4B26A]">
+                  Mevcut Sistem TTS Profili (Antalia-2 Mini)
+                </p>
+                <h2 className="text-base font-semibold text-white">
+                  {scholars.profiles.scholar_1.name} (Sistem TTS Hız / Perde)
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => testSystemTurkishSpeech('scholar_1')}
+                className="inline-flex items-center gap-1.5 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-[#F4E3BD] font-semibold text-xs px-3 py-1.5 cursor-pointer"
+              >
+                <Volume2 className="w-3.5 h-3.5" />
+                <span>Sistem TTS (Antalia) Testi</span>
+              </button>
+            </div>
+
+            <label className="flex items-start gap-2.5 text-xs text-slate-200 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={voice.scholar1IndependentEnabled !== false}
+                onChange={(e) =>
+                  updateVoiceConfig({ scholar1IndependentEnabled: e.target.checked })
+                }
+                className="mt-0.5 accent-[#C9A45C]"
+              />
+              <span>
+                Yalnızca {scholars.profiles.scholar_1.name} için bağımsız hız ve ses perdesi profili uygula ({scholars.profiles.scholar_2.name} mevcut ayarlarında aynen korunur)
+              </span>
+            </label>
+
+            <div
+              className={`space-y-3.5 pt-2 border-t border-[#16254A] ${
+                voice.scholar1IndependentEnabled === false ? 'opacity-50 pointer-events-none' : ''
+              }`}
+            >
+              <div>
+                <label htmlFor="voice-scholar-1-override" className="block text-xs text-slate-300 mb-1.5">
+                  Hacı Ahmet Özel Ses Seçimi (Opsiyonel)
+                </label>
+                <select
+                  id="voice-scholar-1-override"
+                  value={voice.scholar1VoiceURI}
+                  onChange={(e) => updateVoiceConfig({ scholar1VoiceURI: e.target.value })}
+                  className="w-full bg-[#070E1F] border border-[#233969] px-3 py-2 text-xs text-white focus:outline-none focus:border-[#C9A45C]"
+                >
+                  <option value="">
+                    Varsayılan / Antalia-2 Mini Motoru (Yalnızca Hız ve Perde Farklılaşır)
+                  </option>
+                  {turkishVoices.map((v) => (
+                    <option key={`s1-${v.voiceURI}`} value={v.voiceURI}>
+                      {formatVoiceLabel(v)}
+                    </option>
+                  ))}
+                  {otherVoices.map((v) => (
+                    <option key={`s1o-${v.voiceURI}`} value={v.voiceURI}>
+                      {formatVoiceLabel(v)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="flex justify-between text-xs mb-1">
+                  <label htmlFor="scholar1-rate" className="text-slate-300">
+                    Hacı Ahmet Konuşma Hızı (Ağırbaşlı: 0.76×)
+                  </label>
+                  <span className="font-mono-tabular text-[#E5C88B]">
+                    {(voice.scholar1Rate ?? 0.76).toFixed(2)}×
+                  </span>
+                </div>
+                <input
+                  id="scholar1-rate"
+                  type="range"
+                  min={0.55}
+                  max={1.15}
+                  step={0.02}
+                  value={voice.scholar1Rate ?? 0.76}
+                  onChange={(e) => updateVoiceConfig({ scholar1Rate: Number(e.target.value) })}
+                  className="w-full accent-[#C9A45C]"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between text-xs mb-1">
+                  <label htmlFor="scholar1-pitch" className="text-slate-300">
+                    Hacı Ahmet Ses Perdesi / Kalınlık (Tok Ton: 0.68)
+                  </label>
+                  <span className="font-mono-tabular text-[#E5C88B]">
+                    {(voice.scholar1Pitch ?? 0.68).toFixed(2)}
+                  </span>
+                </div>
+                <input
+                  id="scholar1-pitch"
+                  type="range"
+                  min={0.5}
+                  max={1.1}
+                  step={0.02}
+                  value={voice.scholar1Pitch ?? 0.68}
+                  onChange={(e) => updateVoiceConfig({ scholar1Pitch: Number(e.target.value) })}
+                  className="w-full accent-[#C9A45C]"
+                />
+              </div>
+
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Not: Android <code className="font-mono text-slate-300">TextToSpeech</code> (Antalia-2 Mini) motoru perde ve konuşma hızı parametrelerini destekler; ses tellerine özel pürüzlülük DSP filtresi sağlamaz. Daha tok ve yaşlı etki için perde düşürülüp okuma hızı ağırlaştırılır.
+              </p>
+            </div>
+          </div>
+
+          {/* Isolated Seslen-TTS Hasan (Hacı Ahmet Efendi ONLY) Verification & Single-Sentence Test */}
+          <div className="bg-[#0B142B] border border-[#C9A45C]/55 p-5 space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[#16254A] pb-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.14em] text-[#D4B26A]">
+                  Aşama 1–4 · Yerel On-Device TTS Testi (Kuyruktan Bağımsız)
+                </p>
+                <h2 className="text-base font-semibold text-white">
+                  Hacı Ahmet Efendi — Seslen-TTS &ldquo;Hasan&rdquo; (70 Yaş · Bariton)
+                </h2>
+                <p className="mt-0.5 text-xs text-slate-400">
+                  Hedef Cihaz: <span className="text-slate-200">Redmi Note 10T 5G (6 GB RAM, arm64-v8a)</span>. Hacı Mehmet Efendi&apos;nin Antalia-2 Mini sesine ve dua kuyruğuna dokunulmaz.
+                </p>
+              </div>
+              <span
+                className={`text-[11px] font-mono px-2 py-1 border ${
+                  seslenStatus?.modelInstalled
+                    ? 'border-emerald-500/50 bg-emerald-950/35 text-emerald-300'
+                    : 'border-amber-500/40 bg-amber-950/30 text-amber-200'
+                }`}
+              >
+                {seslenStatus?.modelInstalled ? 'Model Hazır (310.6 MB)' : 'Model Kurulmadı'}
+              </span>
+            </div>
+
+            {!seslenStatus?.isNativeAndroid || !seslenStatus?.pluginAvailable ? (
+              <div className="bg-[#070E1F] border border-amber-500/40 p-3.5 text-xs text-slate-300 space-y-1.5 leading-relaxed">
+                <p className="font-semibold text-amber-200">
+                  Android APK Ortamı Gerekli (Chrome Preview Aktif)
+                </p>
+                <p>
+                  Chaquopy (<code className="font-mono text-white">turkce-vurgu</code> / <code className="font-mono text-white">turkce-normalize</code>) ve ONNX Runtime (<code className="font-mono text-white">metin.onnx</code> + <code className="font-mono text-white">ses.onnx</code>) yerel Android APK içinde çalışır. Model indirme, SHA-256 doğrulama ve tek cümle Hasan testi Redmi Note 10T 5G üzerindeki APK derlemesinde aktif olur.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3.5 text-xs">
+                {/* Wi-Fi Download & Integrity */}
+                <div className="bg-[#070E1F] border border-[#1B2D58] p-3.5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="font-semibold text-white">1. Wi-Fi Model İndirme &amp; SHA-256 Doğrulama</p>
+                      <p className="text-slate-400">
+                        Wi-Fi: <strong className={seslenStatus.wifiConnected ? 'text-emerald-300' : 'text-amber-300'}>{seslenStatus.wifiConnected ? 'Bağlı' : 'Bağlı Değil (Wi-Fi Gerekli)'}</strong> · Boyut: 310.6 MiB (tek seferlik dahili hafıza)
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {!seslenStatus.modelInstalled && !seslenStatus.isDownloading && (
+                        <button
+                          type="button"
+                          onClick={() => void handleStartSeslenDownload()}
+                          className="bg-[#C9A45C] hover:bg-[#D7B46E] text-[#070D1B] font-semibold px-3 py-1.5 cursor-pointer"
+                        >
+                          {seslenError ? 'Tekrar Dene (Wi-Fi)' : 'Wi-Fi ile Modeli İndir'}
+                        </button>
+                      )}
+                      {seslenStatus.isDownloading && (
+                        <button
+                          type="button"
+                          onClick={() => void cancelSeslenDownload()}
+                          className="bg-[#2B1822] border border-rose-500/40 text-rose-200 px-3 py-1.5 cursor-pointer"
+                        >
+                          İptal Et
+                        </button>
+                      )}
+                      {seslenStatus.modelInstalled && (
+                        <button
+                          type="button"
+                          disabled={seslenIntegrityLoading}
+                          onClick={() => void handleVerifySeslenIntegrity()}
+                          className="bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-[#E5C88B] px-3 py-1.5 cursor-pointer disabled:opacity-60"
+                        >
+                          {seslenIntegrityLoading ? 'SHA-256 Kontrol Ediliyor...' : 'SHA-256 Bütünlüğünü Doğrula'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {(seslenStatus.isDownloading || (seslenProgress && seslenProgress.percent < 100)) && (
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-[11px] text-slate-300">
+                        <span>
+                          {seslenProgress?.phase === 'verifying' ? 'SHA-256 Doğrulanıyor' : 'İndiriliyor'}:{' '}
+                          <code className="font-mono text-white">{seslenProgress?.currentFile || '...'}</code>
+                        </span>
+                        <span className="font-mono-tabular text-[#E5C88B]">
+                          {seslenProgress?.percent ?? seslenStatus.percent}% ({((seslenProgress?.downloadedBytes ?? seslenStatus.downloadedBytes) / (1024 * 1024)).toFixed(1)} / 310.6 MB)
+                        </span>
+                      </div>
+                      <div className="w-full h-2 bg-[#0B142B] border border-[#1B2D58]">
+                        <div
+                          className="h-full bg-[#C9A45C] transition-all"
+                          style={{ width: `${seslenProgress?.percent ?? seslenStatus.percent}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {seslenIntegrity && (
+                    <div
+                      className={`p-2.5 border ${
+                        seslenIntegrity.ok
+                          ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                          : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
+                      }`}
+                    >
+                      {seslenIntegrity.ok
+                        ? `Tüm ${seslenIntegrity.files.length} model dosyasının boyut ve SHA-256 özeti doğrulandı.`
+                        : seslenIntegrity.error || 'Bütünlük doğrulaması başarısız.'}
+                    </div>
+                  )}
+                </div>
+
+                {/* Stage 3: ONNX & Python Contract Check */}
+                <div className="bg-[#070E1F] border border-[#1B2D58] p-3.5 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="font-semibold text-white">2. ONNX Tensor &amp; Python Ön İşleme Doğrulaması</p>
+                    <button
+                      type="button"
+                      disabled={!seslenStatus.modelInstalled || seslenContractLoading}
+                      onClick={() => void handleVerifySeslenContract()}
+                      className="bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-[#E5C88B] px-3 py-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      {seslenContractLoading ? 'Doğrulanıyor...' : 'ONNX Kontratını Doğrula'}
+                    </button>
+                  </div>
+                  {seslenContract && (
+                    <div
+                      className={`p-2.5 border space-y-1 ${
+                        seslenContract.ok
+                          ? 'bg-emerald-950/25 border-emerald-500/40 text-emerald-200'
+                          : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
+                      }`}
+                    >
+                      {seslenContract.ok ? (
+                        <>
+                          <p>
+                            Stil vektörü: <code className="font-mono text-white">hasan/notr ({seslenContract.styleDim} float)</code> · Token L: <code className="font-mono text-white">{seslenContract.tokenLengthL}</code>
+                          </p>
+                          <p className="text-slate-300">
+                            G2P okunuş: <code className="font-mono text-white">{seslenContract.pythonOkunus}</code>
+                          </p>
+                        </>
+                      ) : (
+                        <p>{seslenContract.error}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Stage 4: Isolated Single-Sentence Playback Test */}
+                <div className="bg-[#070E1F] border border-[#1B2D58] p-3.5 space-y-3">
+                  <p className="font-semibold text-white">3. Hacı Ahmet (Hasan Sesi) Tek Cümle Testi</p>
+                  <input
+                    type="text"
+                    value={seslenTestSentence}
+                    onChange={(e) => setSeslenTestSentence(e.target.value)}
+                    className="w-full bg-[#0B142B] border border-[#233969] px-3 py-2 text-xs text-white focus:outline-none focus:border-[#C9A45C]"
+                  />
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-1">
+                      <span className="text-slate-300">Hasan Konuşma Hızı</span>
+                      <span className="font-mono-tabular text-[#E5C88B]">{seslenRate.toFixed(2)}×</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.78}
+                      max={1.12}
+                      step={0.02}
+                      value={seslenRate}
+                      onChange={(e) => setSeslenRate(Number(e.target.value))}
+                      className="w-full accent-[#C9A45C]"
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={!seslenStatus.modelInstalled || seslenSpeaking}
+                      onClick={() => void handleSpeakSeslenTest()}
+                      className="inline-flex items-center gap-1.5 bg-[#C9A45C] hover:bg-[#D7B46E] text-[#070D1B] font-semibold px-3.5 py-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <Volume2 className="w-3.5 h-3.5" />
+                      <span>{seslenSpeaking ? 'Sentezleniyor / Çalınıyor...' : 'Hasan Sesiyle Test Cümlesini Oynat'}</span>
+                    </button>
+                    {seslenStatus.hasLastTestWav && !seslenSpeaking && (
+                      <button
+                        type="button"
+                        onClick={() => void handleReplayLastSeslenWav()}
+                        className="inline-flex items-center gap-1.5 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-[#F4E3BD] px-3 py-2 cursor-pointer"
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        <span>Son Üretilen WAV&apos;ı Çal</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={seslenSpeaking}
+                      onClick={() => void handlePlayOfficialHasanSample()}
+                      className="inline-flex items-center gap-1.5 bg-[#13234B] hover:bg-[#1B3166] border border-[#C9A45C]/45 text-[#E5C88B] px-3 py-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <Volume2 className="w-3.5 h-3.5" />
+                      <span>Resmi Hasan Örneğini Çal (ornekler/hasan.wav)</span>
+                    </button>
+                    {seslenSpeaking && (
+                      <button
+                        type="button"
+                        onClick={() => void handleStopSeslenTest()}
+                        className="inline-flex items-center gap-1.5 bg-[#2B1822] border border-rose-500/40 text-rose-200 px-3 py-2 cursor-pointer"
+                      >
+                        <Square className="w-3.5 h-3.5" />
+                        <span>Durdur</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Live Audio RMS Mouth Level */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[11px] text-slate-400">
+                      <span>PCM Ağız Senkron Seviyesi (24 kHz RMS)</span>
+                      <span className="font-mono-tabular text-slate-200">{Math.round(seslenMouthLevel * 100)}%</span>
+                    </div>
+                    <div className="w-full h-1.5 bg-[#0B142B] border border-[#1B2D58]">
+                      <div
+                        className="h-full bg-emerald-400 transition-all"
+                        style={{ width: `${Math.round(seslenMouthLevel * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {seslenTestResult && seslenTestResult.ok && (
+                    <div className="space-y-2.5">
+                      <div className="p-2.5 border border-emerald-500/40 bg-emerald-950/25 text-emerald-200 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        <div>
+                          <span className="text-slate-400 block">Motor</span>
+                          <strong className="font-mono text-[11px]">ONNX Hasan (Antalia: Yok)</strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-400 block">Sentez / Ses</span>
+                          <strong className="font-mono-tabular">{seslenTestResult.synthesisMs} / {seslenTestResult.audioDurationMs} ms</strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-400 block">RTF</span>
+                          <strong className="font-mono-tabular">{seslenTestResult.rtf}</strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-400 block">Boş RAM</span>
+                          <strong className="font-mono-tabular">{seslenTestResult.memory?.systemAvailMb ?? '—'} MB</strong>
+                        </div>
+                      </div>
+
+                      {seslenTestResult.styleVerification && (
+                        <div className="p-2.5 border border-[#1B2D58] bg-[#0B142B] text-[11px] font-mono text-slate-300 space-y-0.5">
+                          <p className="text-[#E5C88B]">
+                            Stil Doğrulama: {seslenTestResult.styleVerification.speakerKey} ({seslenTestResult.styleVerification.dim} float · L2={seslenTestResult.styleVerification.l2Norm})
+                          </p>
+                          <p>ref[0..3]: {seslenTestResult.styleVerification.refHead}</p>
+                          <p>s[128..131]: {seslenTestResult.styleVerification.styleHead}</p>
+                        </div>
+                      )}
+
+                      {(seslenTestResult.rawPcmStats || seslenTestResult.playedPcmStats) && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono">
+                          {seslenTestResult.rawPcmStats && (
+                            <div className="p-2.5 border border-[#1B2D58] bg-[#0B142B] text-slate-300 space-y-0.5">
+                              <p className="text-white font-semibold">Ham Model Çıktısı (ses.onnx)</p>
+                              <p>Örnek: {seslenTestResult.rawPcmStats.sampleCount} · {seslenTestResult.rawPcmStats.durationMs} ms</p>
+                              <p>Peak: {seslenTestResult.rawPcmStats.peak} · RMS: {seslenTestResult.rawPcmStats.rms} · NaN: {seslenTestResult.rawPcmStats.nanOrInfCount}</p>
+                            </div>
+                          )}
+                          {seslenTestResult.playedPcmStats && (
+                            <div className="p-2.5 border border-[#1B2D58] bg-[#0B142B] text-slate-300 space-y-0.5">
+                              <p className="text-white font-semibold">Oynatılan PCM (AudioTrack)</p>
+                              <p>{seslenTestResult.playedPcmStats.sampleRate} Hz · {seslenTestResult.playedPcmStats.channels}ch · {seslenTestResult.playedPcmStats.encoding}</p>
+                              <p>Peak: {seslenTestResult.playedPcmStats.peak} · RMS: {seslenTestResult.playedPcmStats.rms} · {seslenTestResult.playedPcmStats.durationMs} ms</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {seslenOfficialStats && (
+                    <div className="p-2.5 border border-[#C9A45C]/40 bg-[#0B142B] text-[11px] font-mono text-slate-200">
+                      <span className="text-[#E5C88B]">Resmi Referans (ornekler/hasan.wav):</span>{' '}
+                      {seslenOfficialStats.sampleRate} Hz · {seslenOfficialStats.channels}ch · {seslenOfficialStats.durationMs} ms · Peak {seslenOfficialStats.peak} · RMS {seslenOfficialStats.rms}
+                    </div>
+                  )}
+                </div>
+
+                {seslenError && (
+                  <div className="p-3 border border-rose-500/45 bg-rose-950/35 text-rose-200">
+                    <strong className="text-white">Seslen-TTS Hatası:</strong> {seslenError}
+                  </div>
+                )}
+
+                {seslenLogs.length > 0 && (
+                  <div className="bg-[#070E1F] border border-[#1B2D58] p-3 space-y-1.5">
+                    <p className="font-semibold text-white">Canlı Yerel Motor Kanıt Logları</p>
+                    <div className="max-h-40 overflow-y-auto font-mono text-[10px] text-slate-300 space-y-0.5">
+                      {seslenLogs.map((line, idx) => (
+                        <div key={`slog-${idx}`}>{line}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {seslenStatus.memory && (
+                  <p className="text-[11px] font-mono text-slate-400">
+                    RAM (Redmi Note 10T 5G): JVM {seslenStatus.memory.jvmUsedMb}/{seslenStatus.memory.jvmMaxMb} MB · Native {seslenStatus.memory.nativeHeapMb} MB · Sistem Boş {seslenStatus.memory.systemAvailMb ?? '—'}/{seslenStatus.memory.systemTotalMb ?? '—'} MB
+                  </p>
+                )}
+              </div>
+            )}
+
+            <p className="text-[11px] text-slate-400 leading-relaxed border-t border-[#16254A] pt-3">
+              <strong className="text-slate-300">Lisans Atıfları:</strong>{' '}
+              Seslen-TTS yazılım kodu (MIT — Mehmet Veysel Delibaş) · Model ağırlıkları &amp; &ldquo;hasan&rdquo; sesi (CC BY-SA 4.0) · turkce-vurgu (MIT AND CC-BY-SA-4.0) · turkce-normalize (MIT) · Chaquopy 17.2.0 (MIT) · ONNX Runtime Android 1.32.0 (MIT). Dua kuyruğuna entegrasyon tek cümle ve bellek testi onayından sonra yapılacaktır.
+            </p>
+          </div>
+
           {/* Diagnostics Card */}
           <div className="bg-[#0B142B] border border-[#1B2D58] p-5 space-y-3.5">
             <div className="flex items-center justify-between gap-2">
@@ -590,19 +1220,35 @@ export const VoicePage: React.FC = () => {
               </select>
             </div>
 
-            {/* Required System Turkish Voice Test Button */}
+            {/* Required System Turkish Voice Test Buttons */}
             <div className="bg-[#070E1F] border border-[#C9A45C]/35 p-3.5 space-y-2.5">
               <p className="text-xs text-slate-300">
-                <strong className="text-white">Sistem TTS Hızlı Test:</strong> &ldquo;Esselâmü aleyküm. Allah dualarımızı kabul eylesin.&rdquo;
+                <strong className="text-white">Sistem TTS (Antalia-2 Mini) Hızlı Test:</strong> &ldquo;Esselâmü aleyküm. Allah dualarımızı kabul eylesin.&rdquo;
               </p>
-              <button
-                type="button"
-                onClick={() => testSystemTurkishSpeech(testScholar)}
-                className="inline-flex items-center gap-2 bg-[#C9A45C] hover:bg-[#D7B46E] text-[#070D1B] font-semibold text-xs px-4 py-2.5 cursor-pointer"
-              >
-                <Volume2 className="w-4 h-4" />
-                <span>Sistem Türkçe Sesini Test Et</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => testSystemTurkishSpeech(testScholar)}
+                  className="inline-flex items-center gap-2 bg-[#13234B] hover:bg-[#1B3166] border border-[#C9A45C]/50 text-[#F4E3BD] font-semibold text-xs px-4 py-2.5 cursor-pointer"
+                >
+                  <Volume2 className="w-4 h-4" />
+                  <span>Seçili Hocayı Sistem TTS ile Test Et</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => testSystemTurkishSpeech('scholar_1')}
+                  className="inline-flex items-center gap-1.5 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-slate-300 text-xs px-3 py-2.5 cursor-pointer"
+                >
+                  <span>Hacı Ahmet (Antalia · {scholar1Prosody.rate.toFixed(2)}× / {scholar1Prosody.pitch.toFixed(2)})</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => testSystemTurkishSpeech('scholar_2')}
+                  className="inline-flex items-center gap-1.5 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-slate-200 text-xs px-3 py-2.5 cursor-pointer"
+                >
+                  <span>Hacı Mehmet (Antalia · {scholar2Prosody.rate.toFixed(2)}× / {scholar2Prosody.pitch.toFixed(2)})</span>
+                </button>
+              </div>
             </div>
 
             <div>

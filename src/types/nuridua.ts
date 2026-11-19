@@ -110,6 +110,10 @@ export interface VoiceSettingsConfig {
   pitch: number;
   volume: number;
   externalEndpoint: string;
+  scholar1IndependentEnabled: boolean;
+  scholar1VoiceURI: string;
+  scholar1Rate: number;
+  scholar1Pitch: number;
 }
 
 export type TikTokConnectionState =

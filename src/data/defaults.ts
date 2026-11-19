@@ -186,8 +186,8 @@ export const createDefaultAppState = (): AppState => ({
       scholar_1: {
         id: 'scholar_1',
         name: 'Hacı Ahmet Efendi',
-        title: 'Kıdemli Dua Hocası (Dijital Karakter)',
-        bio: 'Kurgusal dijital karakter. Sakin hitabeti ve şifa/bereket dualarıyla yayına eşlik eder.',
+        title: 'Kıdemli Dua Hocası',
+        bio: 'Sakin hitabeti, şifa ve bereket dualarıyla yayına eşlik eder.',
         capColor: '#1E3A8A',
         jacketColor: '#101F42',
         beardStyle: 'full_white',
@@ -199,8 +199,8 @@ export const createDefaultAppState = (): AppState => ({
       scholar_2: {
         id: 'scholar_2',
         name: 'Hacı Mehmet Efendi',
-        title: 'İkinci Dua Hocası (Dijital Karakter)',
-        bio: 'Kurgusal dijital karakter. Diğer hoca dua okurken dinleyerek ve âmin diyerek eşlik eder.',
+        title: 'İkinci Dua Hocası',
+        bio: 'Diğer hoca dua okurken dinleyerek ve âmin diyerek eşlik eder.',
         capColor: '#1D4ED8',
         jacketColor: '#13244C',
         beardStyle: 'trimmed_silver',
@@ -225,6 +225,10 @@ export const createDefaultAppState = (): AppState => ({
     pitch: 0.84,
     volume: 0.95,
     externalEndpoint: '',
+    scholar1IndependentEnabled: true,
+    scholar1VoiceURI: '',
+    scholar1Rate: 0.76,
+    scholar1Pitch: 0.68,
   },
   tiktok: {
     username: 'fcproplayer7',

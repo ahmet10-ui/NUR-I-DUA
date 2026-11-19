@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Coffee, Copy, Check, ExternalLink, Pause, Play, SkipForward, Camera } from 'lucide-react';
 import { useStudio } from '../../context/StudioContext';
 import { BroadcastView } from '../BroadcastView';
-import { CameraPreset } from '../../three/MosqueScene';
+import { CameraPreset } from '../../scene/PhotorealisticMosqueStage';
 
 interface LiveStudioPageProps {
   onOpenStandaloneBroadcast: () => void;
@@ -41,7 +41,7 @@ export const LiveStudioPage: React.FC<LiveStudioPageProps> = ({ onOpenStandalone
             Live Broadcast Studio
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            Real-time 3D Ottoman mosque preview with synchronized Turkish speech and gold prayer overlays.
+            Real-time photorealistic Ottoman mosque broadcast scene with synchronized Turkish speech and gold prayer overlays.
           </p>
         </div>
 
@@ -102,7 +102,7 @@ export const LiveStudioPage: React.FC<LiveStudioPageProps> = ({ onOpenStandalone
             <div className="pt-2 border-t border-[#16254A]">
               <p className="text-xs text-slate-400 mb-2 flex items-center gap-1.5">
                 <Camera className="w-3.5 h-3.5 text-[#D4B26A]" />
-                <span>3D Camera Framing Preset</span>
+                <span>Camera Framing Preset</span>
               </p>
               <div className="grid grid-cols-3 gap-2">
                 {(

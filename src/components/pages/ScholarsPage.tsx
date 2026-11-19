@@ -11,13 +11,13 @@ export const ScholarsPage: React.FC = () => {
     <div className="space-y-6">
       <div className="border-b border-[#1A2B54] pb-5">
         <p className="text-xs text-[#D4B26A] font-medium tracking-[0.14em] uppercase">
-          3D Digital Characters
+          Photorealistic Live Scene
         </p>
         <h1 className="mt-1 font-display text-3xl font-semibold text-white">
           Scholar Settings
         </h1>
         <p className="mt-1 text-sm text-slate-400">
-          Configure the two fictional elderly Turkish digital scholars, speaker rotation, facial animations, and the 3D character replacement adapter.
+          Configure speaker rotation, natural eye blinking, breathing, head nodding, and voice assignment for Hacı Ahmet Efendi and Hacı Mehmet Efendi.
         </p>
       </div>
 
@@ -186,61 +186,21 @@ export const ScholarsPage: React.FC = () => {
                     className="w-full bg-[#070E1F] border border-[#233969] px-3 py-2 text-sm text-white focus:outline-none focus:border-[#C9A45C]"
                   />
                 </div>
-
-                <div>
-                  <label className="block text-xs text-slate-300 mb-1">Character Rig Provider</label>
-                  <select
-                    value={profile.rigProvider}
-                    onChange={(e) =>
-                      updateScholarProfile(sid, {
-                        rigProvider: e.target.value as 'procedural' | 'custom_gltf',
-                      })
-                    }
-                    className="w-full bg-[#070E1F] border border-[#233969] px-3 py-2 text-sm text-white focus:outline-none focus:border-[#C9A45C]"
-                  >
-                    <option value="procedural">
-                      Procedural Three.js Rig (Initial Prototype Character)
-                    </option>
-                    <option value="custom_gltf">
-                      Licensed Photorealistic GLTF/GLB Humanoid (Adapter Slot)
-                    </option>
-                  </select>
-                </div>
-
-                {profile.rigProvider === 'custom_gltf' && (
-                  <div className="bg-[#070E1F] border border-amber-500/30 p-3 text-xs text-slate-300 space-y-2">
-                    <p className="text-amber-300 font-medium">
-                      External GLTF Humanoid Adapter Architecture
-                    </p>
-                    <p>
-                      Enter a licensed GLB character URL implementing standard <code className="font-mono">Head</code>, <code className="font-mono">Jaw</code>, and blink morph targets. While unconfigured, the procedural Three.js rig remains active.
-                    </p>
-                    <input
-                      type="url"
-                      value={profile.customModelUrl}
-                      onChange={(e) =>
-                        updateScholarProfile(sid, { customModelUrl: e.target.value })
-                      }
-                      placeholder="https://assets.example.com/scholars/scholar.glb"
-                      className="w-full bg-[#0B142B] border border-[#233969] px-3 py-1.5 text-xs font-mono text-white"
-                    />
-                  </div>
-                )}
               </div>
             </div>
           );
         })}
       </div>
 
-      {/* Honest Procedural Architecture Transparency Box */}
+      {/* Photorealistic Stage Architecture Summary */}
       <div className="bg-[#0B142B] border border-[#1B2D58] p-5 flex items-start gap-3.5 text-xs text-slate-300 leading-relaxed">
         <Layers className="w-5 h-5 text-[#D4B26A] shrink-0 mt-0.5" />
         <div>
           <p className="font-semibold text-white">
-            Modular 3D Character Contract (IScholarCharacterRig)
+            Photorealistic Mosque Broadcast Stage (WebGL Portrait Animator)
           </p>
           <p className="mt-1 text-slate-400">
-            The initial scholars are stylized procedural Three.js assemblies wearing blue prayer caps, navy suit jackets, white shirts, and formal trousers—not photorealistic scans. Because the scene controller communicates solely through <code className="font-mono text-slate-200">IScholarCharacterRig</code>, licensed photorealistic 3D humanoid models can replace them without rebuilding the broadcast studio or queue engine.
+            The broadcast viewport renders a high-resolution Ottoman mosque photographic plate driven by a lightweight GPU facial &amp; body motion shader—delivering audio-reactive jaw movement, self-sampled eyelid blinking, chest breathing, subtle dua hand cadence, and listener head turning without heavy 3D meshes or runtime API calls.
           </p>
         </div>
       </div>

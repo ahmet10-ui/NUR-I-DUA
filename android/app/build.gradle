@@ -31,6 +31,10 @@ android {
 
 chaquopy {
     defaultConfig {
+        def ciBuildPython = System.getenv("CHAQUOPY_BUILD_PYTHON")
+        if (ciBuildPython != null && !ciBuildPython.trim().isEmpty()) {
+            buildPython(ciBuildPython.trim())
+        }
         pip {
             install "turkce-normalize>=0.1.9"
             install "turkce-vurgu==0.1.6"

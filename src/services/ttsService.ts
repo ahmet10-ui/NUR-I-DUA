@@ -7,6 +7,7 @@ import {
   VoiceSettingsConfig,
 } from '../types/nuridua';
 import {
+  isNativeAndroidEnvironment,
   isNativeTtsPluginAvailable,
   pauseNativeAndroid,
   resumeNativeAndroid,
@@ -14,6 +15,14 @@ import {
   stopNativeAndroid,
   subscribeNativeAndroidTtsEvents,
 } from './nativeAndroidTtsBridge';
+import {
+  isSeslenLocalPluginAvailable,
+  pauseSeslenQueue,
+  resumeSeslenQueue,
+  speakSeslenQueue,
+  stopSeslenQueue,
+  subscribeSeslenEvents,
+} from './nativeSeslenTtsBridge';
 
 export interface AvailableVoice {
   voiceURI: string;
@@ -1024,34 +1033,205 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
 }
 
 /**
- * Unified TTS router:
- * - In Capacitor Android native builds, automatically uses NativeAndroidTTSProvider
- *   (`android.speech.tts.TextToSpeech`, respecting the system default engine such as Antalia-2 Mini).
- * - In Chrome Preview / standard web browsers, transparently uses BrowserSpeechSynthesisProvider.
- * - Supports optional ServerNeuralTTSProvider with automatic fallback.
+ * On-device Seslen-TTS ("hasan" elderly Turkish male voice) provider for Hacı Ahmet Efendi (scholar_1).
+ * Uses Chaquopy + ONNX Runtime (metin.onnx + ses.onnx) and AudioTrack 24 kHz mono PCM playback.
+ * Never delegates or falls back to Android TextToSpeech / Antalia-2 Mini on error.
+ */
+export class SeslenLocalTTSProvider implements ITTSProvider {
+  readonly id: TTSProviderType = 'browser_speech_synthesis';
+  readonly label = 'Seslen-TTS Hasan (Yerel ONNX Runtime)';
+  readonly isStudioGrade = true;
+
+  private activeUtteranceId: string | null = null;
+  private playbackToken = 0;
+  private utteranceCounter = 0;
+  private isPaused = false;
+  private safetyTimeout: number | null = null;
+  private unsubListeners: (() => void) | null = null;
+
+  isSupported(): boolean {
+    return isSeslenLocalPluginAvailable();
+  }
+
+  private clearSafetyTimeout() {
+    if (this.safetyTimeout !== null) {
+      window.clearTimeout(this.safetyTimeout);
+      this.safetyTimeout = null;
+    }
+  }
+
+  private detachListeners() {
+    if (this.unsubListeners) {
+      this.unsubListeners();
+      this.unsubListeners = null;
+    }
+  }
+
+  speak(text: string, options: TTSSpeakOptions): void {
+    this.stop();
+    const token = ++this.playbackToken;
+
+    const cleanText = text.replace(/\s+/g, ' ').trim();
+    if (!cleanText) {
+      options.onEnd?.();
+      return;
+    }
+
+    if (!this.isSupported()) {
+      options.onError?.(
+        'Seslen-TTS Hasan eklentisi Android üzerinde kullanılabilir değil. Hacı Ahmet Efendi için Antalia-2 Mini sesine geçilmedi.'
+      );
+      return;
+    }
+
+    const utteranceId = `seslen_${Date.now()}_${++this.utteranceCounter}`;
+    this.activeUtteranceId = utteranceId;
+    this.isPaused = false;
+
+    let finished = false;
+    let startedNotified = false;
+
+    const finish = (isErr = false, msg?: string) => {
+      if (finished || this.playbackToken !== token) return;
+      finished = true;
+      this.activeUtteranceId = null;
+      this.isPaused = false;
+      this.clearSafetyTimeout();
+      this.detachListeners();
+      options.onMouthLevel?.(0);
+      if (isErr) {
+        options.onError?.(msg || 'Seslen-TTS Hasan sentezi/oynatımı başarısız oldu.');
+      } else {
+        options.onEnd?.();
+      }
+    };
+
+    const armSafetyTimeout = () => {
+      this.clearSafetyTimeout();
+      const maxDurationMs = Math.max(
+        45000,
+        Math.min(180000, (cleanText.length / Math.max(0.65, options.rate || 0.94)) * 380)
+      );
+      this.safetyTimeout = window.setTimeout(() => {
+        if (!finished && this.playbackToken === token && !this.isPaused) {
+          void stopSeslenQueue();
+          finish(true, 'Seslen-TTS Hasan oynatma zaman aşımına uğradı.');
+        }
+      }, maxDurationMs);
+    };
+
+    armSafetyTimeout();
+
+    const run = async () => {
+      try {
+        const unsub = await subscribeSeslenEvents({
+          onStart: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            if (!startedNotified) {
+              startedNotified = true;
+              options.onStart?.();
+            }
+          },
+          onMouth: (ev) => {
+            if (finished || this.playbackToken !== token || this.isPaused) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            options.onMouthLevel?.(ev.level);
+          },
+          onDone: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId !== this.activeUtteranceId) return;
+            finish(false);
+          },
+          onError: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            finish(true, ev.message || 'Seslen-TTS Hasan oynatma hatası.');
+          },
+        });
+
+        if (finished || this.playbackToken !== token) {
+          unsub();
+          return;
+        }
+        this.unsubListeners = unsub;
+
+        const res = await speakSeslenQueue({
+          text: cleanText,
+          utteranceId,
+          rate: options.rate,
+          volume: options.volume,
+        });
+
+        if (finished || this.playbackToken !== token) return;
+        if (!res.ok) {
+          finish(true, res.error || 'Seslen-TTS Hasan konuşması başlatılamadı.');
+        }
+      } catch (err) {
+        finish(
+          true,
+          err instanceof Error ? err.message : 'Seslen-TTS Hasan yerel köprü hatası.'
+        );
+      }
+    };
+
+    void run();
+  }
+
+  pause(): void {
+    this.isPaused = true;
+    this.clearSafetyTimeout();
+    void pauseSeslenQueue();
+  }
+
+  resume(): void {
+    this.isPaused = false;
+    void resumeSeslenQueue();
+  }
+
+  stop(): void {
+    this.playbackToken++;
+    this.activeUtteranceId = null;
+    this.isPaused = false;
+    this.clearSafetyTimeout();
+    this.detachListeners();
+    void stopSeslenQueue();
+  }
+}
+
+/**
+ * Unified per-scholar TTS router:
+ * - On native Android APK builds:
+ *   - Hacı Ahmet Efendi (`scholar_1`) uses strictly local `SeslenLocalTTSProvider` ("hasan" ONNX)
+ *     and NEVER falls back to Antalia-2 Mini on error.
+ *   - Hacı Mehmet Efendi (`scholar_2`) keeps `NativeAndroidTTSProvider` (Antalia-2 Mini) untouched.
+ * - In Chrome Preview / standard web browsers (`!isNativeAndroidEnvironment()`), falls back to
+ *   BrowserSpeechSynthesisProvider or optional ServerNeuralTTSProvider for desktop previewing.
  */
 export class StudioTTSRouter implements ITTSProvider {
   readonly id: TTSProviderType = 'browser_speech_synthesis';
   readonly label = 'NUR-I DUA Studio TTS Router';
   readonly isStudioGrade = false;
 
-  private activeEngine: 'browser' | 'native_android' | 'neural' = 'browser';
+  private activeEngine: 'browser' | 'native_android' | 'seslen_hasan' | 'neural' = 'browser';
 
   constructor(
     private readonly browserProvider: BrowserSpeechSynthesisProvider,
     private readonly nativeAndroidProvider: NativeAndroidTTSProvider,
-    private readonly neuralProvider: ServerNeuralTTSProvider
+    private readonly neuralProvider: ServerNeuralTTSProvider,
+    private readonly seslenLocalProvider: SeslenLocalTTSProvider
   ) {}
 
   isSupported(): boolean {
     return (
+      this.seslenLocalProvider.isSupported() ||
       this.nativeAndroidProvider.isSupported() ||
       this.browserProvider.isSupported() ||
       this.neuralProvider.isSupported()
     );
   }
 
-  getActiveEngine(): 'browser' | 'native_android' | 'neural' {
+  getActiveEngine(): 'browser' | 'native_android' | 'seslen_hasan' | 'neural' {
     return this.activeEngine;
   }
 
@@ -1068,7 +1248,25 @@ export class StudioTTSRouter implements ITTSProvider {
   speak(text: string, options: TTSSpeakOptions): void {
     this.stop();
 
-    if (options.preferredEngine === 'external_studio_adapter') {
+    // Strict per-scholar isolation on Android:
+    // Hacı Ahmet Efendi (scholar_1) uses ONLY Seslen-TTS Hasan; never fallback to Antalia-2 Mini.
+    if (
+      options.scholarId === 'scholar_1' &&
+      !options.forceStandardSystemTts &&
+      isNativeAndroidEnvironment()
+    ) {
+      this.activeEngine = 'seslen_hasan';
+      if (!this.seslenLocalProvider.isSupported()) {
+        options.onError?.(
+          'Seslen-TTS Hasan eklentisi Android üzerinde aktif değil. Hacı Ahmet Efendi için Antalia-2 Mini sesine geçiş yapılmadı.'
+        );
+        return;
+      }
+      this.seslenLocalProvider.speak(text, options);
+      return;
+    }
+
+    if (options.preferredEngine === 'external_studio_adapter' && !options.forceStandardSystemTts) {
       this.activeEngine = 'neural';
       this.neuralProvider.speak(text, {
         ...options,
@@ -1090,7 +1288,9 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   pause(): void {
-    if (this.activeEngine === 'neural') {
+    if (this.activeEngine === 'seslen_hasan') {
+      this.seslenLocalProvider.pause();
+    } else if (this.activeEngine === 'neural') {
       this.neuralProvider.pause();
     } else if (this.activeEngine === 'native_android') {
       this.nativeAndroidProvider.pause();
@@ -1100,7 +1300,9 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   resume(): void {
-    if (this.activeEngine === 'neural') {
+    if (this.activeEngine === 'seslen_hasan') {
+      this.seslenLocalProvider.resume();
+    } else if (this.activeEngine === 'neural') {
       this.neuralProvider.resume();
     } else if (this.activeEngine === 'native_android') {
       this.nativeAndroidProvider.resume();
@@ -1110,6 +1312,7 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   stop(): void {
+    this.seslenLocalProvider.stop();
     this.neuralProvider.stop();
     this.nativeAndroidProvider.stop();
     this.browserProvider.stop();
@@ -1119,8 +1322,10 @@ export class StudioTTSRouter implements ITTSProvider {
 export const browserTTSProvider = new BrowserSpeechSynthesisProvider();
 export const nativeAndroidTTSProvider = new NativeAndroidTTSProvider();
 export const serverNeuralTTSProvider = new ServerNeuralTTSProvider();
+export const seslenLocalTTSProvider = new SeslenLocalTTSProvider();
 export const studioTTSRouter = new StudioTTSRouter(
   browserTTSProvider,
   nativeAndroidTTSProvider,
-  serverNeuralTTSProvider
+  serverNeuralTTSProvider,
+  seslenLocalTTSProvider
 );

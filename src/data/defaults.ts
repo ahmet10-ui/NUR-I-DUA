@@ -229,6 +229,7 @@ export const createDefaultAppState = (): AppState => ({
     scholar1VoiceURI: '',
     scholar1Rate: 0.76,
     scholar1Pitch: 0.68,
+    seslenHasanRate: 0.94,
   },
   tiktok: {
     username: 'fcproplayer7',

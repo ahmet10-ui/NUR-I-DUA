@@ -157,6 +157,8 @@ public class SeslenLocalTtsPlugin extends Plugin {
     private final AtomicBoolean isDownloading = new AtomicBoolean(false);
     private final AtomicBoolean cancelDownloadRequested = new AtomicBoolean(false);
     private final AtomicLong activePlaybackToken = new AtomicLong(0);
+    private final AtomicBoolean isPlaybackPaused = new AtomicBoolean(false);
+    private volatile String activeUtteranceId = null;
 
     private final Object ortLock = new Object();
     private OrtEnvironment ortEnv = null;
@@ -1003,8 +1005,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
 
     /**
      * Stage 4 isolated test playback ONLY for Hacı Ahmet Efendi ("hasan" voice).
-     * Pre-synthesizes all chunks before starting AudioTrack MODE_STATIC (eliminates underruns/crackling)
-     * and writes `last_test_hasan.wav` so raw model output vs playback PCM can be inspected separately.
+     * Resolves after completion and saves `last_test_hasan.wav` for diagnostic inspection.
      */
     @PluginMethod
     public void speakTest(PluginCall call) {
@@ -1013,135 +1014,249 @@ public class SeslenLocalTtsPlugin extends Plugin {
         double volumeVal = call.getDouble("volume", 0.95);
         final float rate = (float) Math.max(0.65, Math.min(1.30, rateVal));
         final float volume = (float) Math.max(0.0, Math.min(1.0, volumeVal));
+        final String utteranceId = "test_" + System.currentTimeMillis();
 
         if (text == null || text.trim().isEmpty()) {
             JSObject err = new JSObject();
             err.put("ok", false);
+            err.put("antaliaUsed", false);
             err.put("error", "Test cümlesi boş olamaz.");
             call.resolve(err);
             return;
         }
 
+        if (!allFilesPresentWithExpectedSize(getModelDir())) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("modelMissing", true);
+            err.put("antaliaUsed", false);
+            err.put("error", "Seslen-TTS Hasan model dosyaları henüz indirilmemiş.");
+            call.resolve(err);
+            return;
+        }
+
         final long token = activePlaybackToken.incrementAndGet();
+        activeUtteranceId = utteranceId;
+        isPlaybackPaused.set(false);
         stopAudioTrackImmediate();
 
-        synthesisExecutor.execute(() -> {
-            long startWallMs = System.currentTimeMillis();
-            long synthElapsedMs = 0L;
+        synthesisExecutor.execute(() -> executeSynthesisAndPlayback(call, false, utteranceId, text, rate, volume, token, true, "ONNX Hasan Test"));
+    }
 
-            try {
-                addLog("Test başlatıldı -> ENGINE=SeslenLocalTts (ONNX Runtime). Android TextToSpeech / Antalia-2 Mini ÇAĞRILMADI.");
-                ensurePythonStarted();
-                ensureSessionsLoaded();
+    /**
+     * Stage 5 prayer queue playback ONLY for Hacı Ahmet Efendi (scholar_1, "hasan" voice).
+     * Resolves immediately once queued on synthesisExecutor; lifecycle events (`seslenStart`,
+     * `seslenMouth`, `seslenDone`, `seslenError`) carry `utteranceId` so cancelled/skipped items
+     * never corrupt queue ordering. Never falls back to Antalia-2 Mini / Android TextToSpeech.
+     */
+    @PluginMethod
+    public void speak(PluginCall call) {
+        String text = call.getString("text", "");
+        String utteranceId = call.getString("utteranceId", "seslen_" + System.currentTimeMillis());
+        double rateVal = call.getDouble("rate", 0.94);
+        double volumeVal = call.getDouble("volume", 0.95);
+        final float rate = (float) Math.max(0.65, Math.min(1.30, rateVal));
+        final float volume = (float) Math.max(0.0, Math.min(1.0, volumeVal));
 
-                File dir = getModelDir();
-                File sembollerFile = new File(dir, "semboller.json");
-                Python py = Python.getInstance();
-                PyObject g2pMod = py.getModule("seslen_g2p");
-                String preparedJson = g2pMod.callAttr("prepare_chunks", text, sembollerFile.getAbsolutePath()).toString();
-                JSONObject prep = new JSONObject(preparedJson);
-                JSONArray chunks = prep.getJSONArray("chunks");
-                if (chunks.length() == 0) {
-                    throw new RuntimeException("Seslendirilecek Türkçe metin parçası oluşturulamadı.");
+        if (text == null || text.trim().isEmpty()) {
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("utteranceId", utteranceId);
+            err.put("antaliaUsed", false);
+            err.put("error", "Seslendirilecek dua metni boş.");
+            call.resolve(err);
+            return;
+        }
+
+        if (!allFilesPresentWithExpectedSize(getModelDir())) {
+            String msg = "Seslen-TTS Hasan model dosyaları cihazda kurulu değil. Hacı Ahmet Efendi için Antalia-2 Mini'ye geçiş yapılmadı; lütfen Ses Ayarları ekranından Hasan modelini Wi-Fi ile indirin.";
+            addLog("Kuyruk konuşması reddedildi (" + utteranceId + "): " + msg);
+            JSObject err = new JSObject();
+            err.put("ok", false);
+            err.put("modelMissing", true);
+            err.put("utteranceId", utteranceId);
+            err.put("antaliaUsed", false);
+            err.put("error", msg);
+            call.resolve(err);
+            return;
+        }
+
+        final long token = activePlaybackToken.incrementAndGet();
+        activeUtteranceId = utteranceId;
+        isPlaybackPaused.set(false);
+        stopAudioTrackImmediate();
+
+        JSObject ack = new JSObject();
+        ack.put("ok", true);
+        ack.put("utteranceId", utteranceId);
+        ack.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
+        ack.put("antaliaUsed", false);
+        call.resolve(ack);
+
+        synthesisExecutor.execute(() -> executeSynthesisAndPlayback(null, true, utteranceId, text, rate, volume, token, false, "ONNX Hasan Kuyruk"));
+    }
+
+    private void executeSynthesisAndPlayback(
+        PluginCall resolveCall,
+        boolean queueMode,
+        String utteranceId,
+        String text,
+        float rate,
+        float volume,
+        long token,
+        boolean saveDebugWav,
+        String logLabel
+    ) {
+        long startWallMs = System.currentTimeMillis();
+        long synthElapsedMs = 0L;
+
+        try {
+            if (activePlaybackToken.get() != token) {
+                return;
+            }
+            addLog(logLabel + " başlatıldı (utteranceId=" + utteranceId + ", rate=" + rate + ") -> ENGINE=SeslenLocalTts (ONNX Runtime). Android TextToSpeech / Antalia-2 Mini ÇAĞRILMADI.");
+            ensurePythonStarted();
+            ensureSessionsLoaded();
+
+            File dir = getModelDir();
+            File sembollerFile = new File(dir, "semboller.json");
+            Python py = Python.getInstance();
+            PyObject g2pMod = py.getModule("seslen_g2p");
+            String preparedJson = g2pMod.callAttr("prepare_chunks", text, sembollerFile.getAbsolutePath()).toString();
+            JSONObject prep = new JSONObject(preparedJson);
+            JSONArray chunks = prep.getJSONArray("chunks");
+            if (chunks.length() == 0) {
+                throw new RuntimeException("Seslendirilecek Türkçe metin parçası oluşturulamadı.");
+            }
+            addLog("Python G2P hazır: " + chunks.length() + " parça, ilk okunuş=\"" + chunks.getJSONObject(0).getString("okunus") + "\"");
+
+            List<float[]> chunkWaves = new ArrayList<>();
+            List<Integer> chunkSilences = new ArrayList<>();
+
+            for (int c = 0; c < chunks.length(); c++) {
+                if (activePlaybackToken.get() != token) {
+                    throw new InterruptedException("Konuşma başlatılmadan durduruldu.");
                 }
-                addLog("Python G2P hazır: " + chunks.length() + " parça, ilk okunuş=\"" + chunks.getJSONObject(0).getString("okunus") + "\"");
+                JSONObject chunk = chunks.getJSONObject(c);
+                long sStart = System.currentTimeMillis();
+                float[] chunkPcm = synthesizeSingleChunk(chunk, rate, c);
+                synthElapsedMs += (System.currentTimeMillis() - sStart);
+                chunkWaves.add(chunkPcm);
+                chunkSilences.add(chunk.optInt("silenceAfterMs", 450));
+            }
 
-                List<float[]> chunkWaves = new ArrayList<>();
-                List<Integer> chunkSilences = new ArrayList<>();
+            if (activePlaybackToken.get() != token) {
+                throw new InterruptedException("Konuşma oynatılmadan durduruldu.");
+            }
 
-                for (int c = 0; c < chunks.length(); c++) {
-                    if (activePlaybackToken.get() != token) {
-                        throw new InterruptedException("Test oynatımı başlatılmadan durduruldu.");
-                    }
-                    JSONObject chunk = chunks.getJSONObject(c);
-                    long sStart = System.currentTimeMillis();
-                    float[] chunkPcm = synthesizeSingleChunk(chunk, rate, c);
-                    synthElapsedMs += (System.currentTimeMillis() - sStart);
-                    chunkWaves.add(chunkPcm);
-                    chunkSilences.add(chunk.optInt("silenceAfterMs", 450));
-                }
+            float[] rawMerged = concatChunksWithGaps(chunkWaves, chunkSilences);
+            PcmStats rawStats = analyzeFloatPcm(rawMerged);
+            addLog("Ham ses.onnx çıktısı: samples=" + rawStats.sampleCount + ", dur=" + rawStats.durationMs
+                + "ms, min=" + rawStats.min + ", max=" + rawStats.max + ", peak=" + rawStats.peak
+                + ", rms=" + rawStats.rms + ", NaN=" + rawStats.nanOrInfCount);
 
-                float[] rawMerged = concatChunksWithGaps(chunkWaves, chunkSilences);
-                PcmStats rawStats = analyzeFloatPcm(rawMerged);
-                addLog("Ham ses.onnx çıktısı: samples=" + rawStats.sampleCount + ", dur=" + rawStats.durationMs
-                    + "ms, min=" + rawStats.min + ", max=" + rawStats.max + ", peak=" + rawStats.peak
-                    + ", rms=" + rawStats.rms + ", NaN=" + rawStats.nanOrInfCount);
+            if (rawStats.nanOrInfCount > 0) {
+                throw new RuntimeException("ONNX ses.onnx çıktısında NaN/Inf değer tespit edildi (" + rawStats.nanOrInfCount + ").");
+            }
 
-                if (rawStats.nanOrInfCount > 0) {
-                    throw new RuntimeException("ONNX ses.onnx çıktısında NaN/Inf değer tespit edildi (" + rawStats.nanOrInfCount + ").");
-                }
+            short[] pcm16 = preparePlaybackPcm16(rawMerged, rawStats);
+            PcmStats playedStats = analyzeShortPcm(pcm16);
 
-                short[] pcm16 = preparePlaybackPcm16(rawMerged, rawStats);
-                PcmStats playedStats = analyzeShortPcm(pcm16);
-
+            String wavPath = null;
+            if (saveDebugWav) {
                 File wavFile = new File(dir, LAST_TEST_WAV_NAME);
                 writeWavFile(wavFile, pcm16, SAMPLE_RATE);
+                wavPath = wavFile.getAbsolutePath();
                 addLog("24 kHz 16-bit mono WAV yazıldı: " + wavFile.getName() + " (" + wavFile.length() + " bayt, peak=" + playedStats.peak + ", rms=" + playedStats.rms + ")");
+            }
 
-                notifyListeners("seslenStart", new JSObject().put("token", token));
-                playShortPcm16Clean(pcm16, volume, token, "ONNX Hasan");
+            if (activePlaybackToken.get() != token) {
+                throw new InterruptedException("Konuşma durduruldu.");
+            }
 
-                if (activePlaybackToken.get() == token) {
-                    double rtf = playedStats.durationMs > 0 ? (synthElapsedMs / (double) playedStats.durationMs) : 0.0;
-                    addLog("AudioTrack 24 kHz mono oynatma tamamlandı (RTF=" + String.format(Locale.ROOT, "%.3f", rtf) + "). Antalia-2 Mini'ye hiç başvurulmadı.");
+            JSObject startPayload = new JSObject();
+            startPayload.put("token", token);
+            startPayload.put("utteranceId", utteranceId);
+            startPayload.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
+            startPayload.put("antaliaUsed", false);
+            notifyListeners("seslenStart", startPayload);
 
-                    JSObject donePayload = new JSObject();
-                    donePayload.put("token", token);
-                    donePayload.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
-                    donePayload.put("antaliaUsed", false);
-                    donePayload.put("synthesisMs", synthElapsedMs);
-                    donePayload.put("audioDurationMs", playedStats.durationMs);
-                    donePayload.put("totalWallMs", System.currentTimeMillis() - startWallMs);
-                    donePayload.put("rtf", Math.round(rtf * 1000.0) / 1000.0);
-                    donePayload.put("styleVerification", buildStyleVerificationObj());
-                    donePayload.put("rawPcmStats", rawStats.toJson());
-                    donePayload.put("playedPcmStats", playedStats.toJson());
-                    donePayload.put("wavFile", wavFile.getAbsolutePath());
-                    donePayload.put("memory", collectMemoryStats());
-                    donePayload.put("logs", getRecentLogsArray());
-                    notifyListeners("seslenDone", donePayload);
+            playShortPcm16Clean(pcm16, volume, token, logLabel);
 
-                    JSObject res = new JSObject();
-                    res.put("ok", true);
-                    res.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
-                    res.put("antaliaUsed", false);
-                    res.put("synthesisMs", synthElapsedMs);
-                    res.put("audioDurationMs", playedStats.durationMs);
-                    res.put("rtf", Math.round(rtf * 1000.0) / 1000.0);
-                    res.put("styleVerification", buildStyleVerificationObj());
-                    res.put("rawPcmStats", rawStats.toJson());
-                    res.put("playedPcmStats", playedStats.toJson());
-                    res.put("wavFile", wavFile.getAbsolutePath());
-                    res.put("memory", collectMemoryStats());
-                    res.put("logs", getRecentLogsArray());
-                    call.resolve(res);
-                } else {
-                    JSObject res = new JSObject();
-                    res.put("ok", false);
-                    res.put("cancelled", true);
-                    res.put("error", "Test oynatımı durduruldu.");
-                    res.put("logs", getRecentLogsArray());
-                    call.resolve(res);
+            if (activePlaybackToken.get() == token) {
+                double rtf = playedStats.durationMs > 0 ? (synthElapsedMs / (double) playedStats.durationMs) : 0.0;
+                addLog("AudioTrack 24 kHz mono oynatma tamamlandı (utteranceId=" + utteranceId + ", RTF=" + String.format(Locale.ROOT, "%.3f", rtf) + "). Antalia-2 Mini'ye hiç başvurulmadı.");
+
+                JSObject donePayload = new JSObject();
+                donePayload.put("ok", true);
+                donePayload.put("token", token);
+                donePayload.put("utteranceId", utteranceId);
+                donePayload.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
+                donePayload.put("antaliaUsed", false);
+                donePayload.put("synthesisMs", synthElapsedMs);
+                donePayload.put("audioDurationMs", playedStats.durationMs);
+                donePayload.put("totalWallMs", System.currentTimeMillis() - startWallMs);
+                donePayload.put("rtf", Math.round(rtf * 1000.0) / 1000.0);
+                donePayload.put("styleVerification", buildStyleVerificationObj());
+                donePayload.put("rawPcmStats", rawStats.toJson());
+                donePayload.put("playedPcmStats", playedStats.toJson());
+                if (wavPath != null) donePayload.put("wavFile", wavPath);
+                donePayload.put("memory", collectMemoryStats());
+                donePayload.put("logs", getRecentLogsArray());
+                notifyListeners("seslenDone", donePayload);
+
+                if (resolveCall != null) {
+                    resolveCall.resolve(donePayload);
                 }
-            } catch (Exception e) {
-                stopAudioTrackImmediate();
-                notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
-                String msg = e.getMessage() != null ? e.getMessage() : "Seslen-TTS test sentezi başarısız.";
-                addLog("Test hatası: " + msg);
-
-                JSObject errEv = new JSObject();
-                errEv.put("token", token);
-                errEv.put("message", msg);
-                notifyListeners("seslenError", errEv);
-
+            } else if (resolveCall != null) {
                 JSObject res = new JSObject();
                 res.put("ok", false);
+                res.put("cancelled", true);
+                res.put("utteranceId", utteranceId);
+                res.put("antaliaUsed", false);
+                res.put("error", "Test oynatımı durduruldu.");
+                res.put("logs", getRecentLogsArray());
+                resolveCall.resolve(res);
+            }
+        } catch (InterruptedException ie) {
+            stopAudioTrackImmediate();
+            notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+            if (resolveCall != null) {
+                JSObject res = new JSObject();
+                res.put("ok", false);
+                res.put("cancelled", true);
+                res.put("utteranceId", utteranceId);
+                res.put("antaliaUsed", false);
+                res.put("error", ie.getMessage() != null ? ie.getMessage() : "Oynatım durduruldu.");
+                res.put("logs", getRecentLogsArray());
+                resolveCall.resolve(res);
+            }
+        } catch (Exception e) {
+            stopAudioTrackImmediate();
+            notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+            String msg = e.getMessage() != null ? e.getMessage() : "Seslen-TTS sentezi başarısız.";
+            addLog("Sentez/oynatma hatası (utteranceId=" + utteranceId + "): " + msg);
+
+            if (!queueMode || activePlaybackToken.get() == token) {
+                JSObject errEv = new JSObject();
+                errEv.put("token", token);
+                errEv.put("utteranceId", utteranceId);
+                errEv.put("antaliaUsed", false);
+                errEv.put("message", msg);
+                notifyListeners("seslenError", errEv);
+            }
+
+            if (resolveCall != null) {
+                JSObject res = new JSObject();
+                res.put("ok", false);
+                res.put("utteranceId", utteranceId);
+                res.put("antaliaUsed", false);
                 res.put("error", msg);
                 res.put("memory", collectMemoryStats());
                 res.put("logs", getRecentLogsArray());
-                call.resolve(res);
+                resolveCall.resolve(res);
             }
-        });
+        }
     }
 
     /**
@@ -1229,8 +1344,54 @@ public class SeslenLocalTtsPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void pause(PluginCall call) {
+        isPlaybackPaused.set(true);
+        synchronized (audioLock) {
+            if (activeAudioTrack != null && activeAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                try {
+                    activeAudioTrack.pause();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+        call.resolve(new JSObject().put("ok", true));
+    }
+
+    @PluginMethod
+    public void resume(PluginCall call) {
+        isPlaybackPaused.set(false);
+        synchronized (audioLock) {
+            if (activeAudioTrack != null && activeAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PAUSED) {
+                try {
+                    activeAudioTrack.play();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        if (activeUtteranceId != null) {
+            res.put("utteranceId", activeUtteranceId);
+        }
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void stop(PluginCall call) {
+        activePlaybackToken.incrementAndGet();
+        activeUtteranceId = null;
+        isPlaybackPaused.set(false);
+        stopAudioTrackImmediate();
+        notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+        call.resolve(new JSObject().put("ok", true));
+    }
+
+    @PluginMethod
     public void stopTest(PluginCall call) {
         activePlaybackToken.incrementAndGet();
+        activeUtteranceId = null;
+        isPlaybackPaused.set(false);
         stopAudioTrackImmediate();
         notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
         JSObject res = new JSObject();
@@ -1479,11 +1640,45 @@ public class SeslenLocalTtsPlugin extends Plugin {
             }
             track.play();
 
-            long startMs = System.currentTimeMillis();
-            long maxWaitMs = ((totalFrames * 1000L) / SAMPLE_RATE) + 1500L;
+            long activePlayedMs = 0L;
+            long lastLoopMs = System.currentTimeMillis();
+            long maxWaitMs = ((totalFrames * 1000L) / SAMPLE_RATE) + 2500L;
             while (activePlaybackToken.get() == token) {
+                long nowMs = System.currentTimeMillis();
+                long dt = Math.max(0L, nowMs - lastLoopMs);
+                lastLoopMs = nowMs;
+
+                if (isPlaybackPaused.get()) {
+                    synchronized (audioLock) {
+                        if (activeAudioTrack != null && activeAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                            try {
+                                activeAudioTrack.pause();
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                    notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+                    try {
+                        Thread.sleep(45);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    continue;
+                } else {
+                    synchronized (audioLock) {
+                        if (activeAudioTrack != null && activeAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PAUSED) {
+                            try {
+                                activeAudioTrack.play();
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                }
+
+                activePlayedMs += dt;
                 int head = track.getPlaybackHeadPosition();
-                if (head >= totalFrames || (System.currentTimeMillis() - startMs) > maxWaitMs) {
+                if (head >= totalFrames || activePlayedMs > maxWaitMs) {
                     break;
                 }
                 int windowStart = Math.max(0, Math.min(head, totalFrames - 1));
@@ -1526,6 +1721,33 @@ public class SeslenLocalTtsPlugin extends Plugin {
             int offset = 0;
             int chunkShorts = 2400; // 100 ms blocks -> zero bridge flooding
             while (offset < pcm16.length && activePlaybackToken.get() == token) {
+                if (isPlaybackPaused.get()) {
+                    synchronized (audioLock) {
+                        if (activeAudioTrack != null && activeAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                            try {
+                                activeAudioTrack.pause();
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                    notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+                    try {
+                        Thread.sleep(45);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    continue;
+                } else {
+                    synchronized (audioLock) {
+                        if (activeAudioTrack != null && activeAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PAUSED) {
+                            try {
+                                activeAudioTrack.play();
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                }
                 int count = Math.min(chunkShorts, pcm16.length - offset);
                 double sumSq = 0.0;
                 for (int i = 0; i < count; i++) {

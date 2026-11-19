@@ -120,7 +120,7 @@ export const VoicePage: React.FC = () => {
   const [seslenTestSentence, setSeslenTestSentence] = useState(
     'Esselâmü aleyküm. Allah dualarımızı kabul eylesin.'
   );
-  const [seslenRate, setSeslenRate] = useState(0.94);
+  const seslenRate = voice.seslenHasanRate ?? 0.94;
   const [seslenSpeaking, setSeslenSpeaking] = useState(false);
   const [seslenMouthLevel, setSeslenMouthLevel] = useState(0);
   const [seslenTestResult, setSeslenTestResult] = useState<SeslenSpeakTestResult | null>(null);
@@ -816,13 +816,13 @@ export const VoicePage: React.FC = () => {
             <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[#16254A] pb-3">
               <div>
                 <p className="text-[11px] uppercase tracking-[0.14em] text-[#D4B26A]">
-                  Aşama 1–4 · Yerel On-Device TTS Testi (Kuyruktan Bağımsız)
+                  Aşama 5 Aktif · Hacı Ahmet Kuyruğu: Seslen-TTS Hasan
                 </p>
                 <h2 className="text-base font-semibold text-white">
                   Hacı Ahmet Efendi — Seslen-TTS &ldquo;Hasan&rdquo; (70 Yaş · Bariton)
                 </h2>
                 <p className="mt-0.5 text-xs text-slate-400">
-                  Hedef Cihaz: <span className="text-slate-200">Redmi Note 10T 5G (6 GB RAM, arm64-v8a)</span>. Hacı Mehmet Efendi&apos;nin Antalia-2 Mini sesine ve dua kuyruğuna dokunulmaz.
+                  Hedef Cihaz: <span className="text-slate-200">Redmi Note 10T 5G (6 GB RAM, arm64-v8a)</span>. Hacı Ahmet dua kuyruğunda Seslen-TTS Hasan kullanır; Hacı Mehmet Efendi&apos;nin Antalia-2 Mini sesi aynen korunur.
                 </p>
               </div>
               <span
@@ -980,7 +980,7 @@ export const VoicePage: React.FC = () => {
                       max={1.12}
                       step={0.02}
                       value={seslenRate}
-                      onChange={(e) => setSeslenRate(Number(e.target.value))}
+                      onChange={(e) => updateVoiceConfig({ seslenHasanRate: Number(e.target.value) })}
                       className="w-full accent-[#C9A45C]"
                     />
                   </div>
@@ -1125,8 +1125,8 @@ export const VoicePage: React.FC = () => {
             )}
 
             <p className="text-[11px] text-slate-400 leading-relaxed border-t border-[#16254A] pt-3">
-              <strong className="text-slate-300">Lisans Atıfları:</strong>{' '}
-              Seslen-TTS yazılım kodu (MIT — Mehmet Veysel Delibaş) · Model ağırlıkları &amp; &ldquo;hasan&rdquo; sesi (CC BY-SA 4.0) · turkce-vurgu (MIT AND CC-BY-SA-4.0) · turkce-normalize (MIT) · Chaquopy 17.2.0 (MIT) · ONNX Runtime Android 1.32.0 (MIT). Dua kuyruğuna entegrasyon tek cümle ve bellek testi onayından sonra yapılacaktır.
+              <strong className="text-slate-300">Lisans &amp; Yönlendirme:</strong>{' '}
+              Seslen-TTS yazılım kodu (MIT — Mehmet Veysel Delibaş) · Model ağırlıkları &amp; &ldquo;hasan&rdquo; sesi (CC BY-SA 4.0) · turkce-vurgu (MIT AND CC-BY-SA-4.0) · turkce-normalize (MIT) · Chaquopy 17.2.0 (MIT) · ONNX Runtime Android 1.32.0 (MIT). Hacı Ahmet Efendi (scholar_1) kuyrukta yalnızca Seslen-TTS Hasan kullanır (hata hâlinde Antalia&apos;ya geri düşmez); Hacı Mehmet Efendi (scholar_2) Antalia-2 Mini motorunda korunur.
             </p>
           </div>
 

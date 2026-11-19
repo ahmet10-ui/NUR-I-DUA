@@ -114,6 +114,7 @@ export interface VoiceSettingsConfig {
   scholar1VoiceURI: string;
   scholar1Rate: number;
   scholar1Pitch: number;
+  seslenHasanRate?: number;
 }
 
 export type TikTokConnectionState =
@@ -228,6 +229,8 @@ export interface IScholarCharacterRig {
 }
 
 export interface TTSSpeakOptions {
+  scholarId?: ScholarId;
+  forceStandardSystemTts?: boolean;
   preferredEngine?: TTSProviderType;
   voiceURI?: string;
   neuralProviderId?: NeuralTTSProviderId;

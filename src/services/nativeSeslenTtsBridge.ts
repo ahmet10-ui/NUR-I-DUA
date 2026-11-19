@@ -130,6 +130,22 @@ interface SeslenLocalTtsPluginContract {
   cancelDownload(): Promise<{ ok: boolean }>;
   verifyInferenceContract(params: { text?: string }): Promise<SeslenContractVerificationResult>;
   speakTest(params: { text: string; rate?: number; volume?: number }): Promise<SeslenSpeakTestResult>;
+  speak(params: {
+    text: string;
+    utteranceId: string;
+    rate?: number;
+    volume?: number;
+  }): Promise<{
+    ok: boolean;
+    utteranceId?: string;
+    engineUsed?: string;
+    antaliaUsed?: boolean;
+    modelMissing?: boolean;
+    error?: string;
+  }>;
+  pause(): Promise<{ ok: boolean }>;
+  resume(): Promise<{ ok: boolean; utteranceId?: string }>;
+  stop(): Promise<{ ok: boolean }>;
   replayLastTestWav(params: { volume?: number }): Promise<{ ok: boolean; playedPcmStats?: SeslenPcmStats; logs?: string[]; error?: string }>;
   playOfficialHasanSample(params: { volume?: number }): Promise<{ ok: boolean; officialSampleStats?: SeslenPcmStats; logs?: string[]; error?: string }>;
   stopTest(): Promise<{ ok: boolean }>;
@@ -143,11 +159,11 @@ interface SeslenLocalTtsPluginContract {
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenStart',
-    listenerFunc: (event: { token: number }) => void
+    listenerFunc: (event: { token: number; utteranceId?: string }) => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenMouth',
-    listenerFunc: (event: { level: number }) => void
+    listenerFunc: (event: { level: number; utteranceId?: string }) => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenLog',
@@ -155,11 +171,11 @@ interface SeslenLocalTtsPluginContract {
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenDone',
-    listenerFunc: (event: SeslenSpeakTestResult & { token: number; totalWallMs?: number }) => void
+    listenerFunc: (event: SeslenSpeakTestResult & { token: number; utteranceId?: string; totalWallMs?: number }) => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenError',
-    listenerFunc: (event: { token: number; message: string }) => void
+    listenerFunc: (event: { token: number; utteranceId?: string; message: string }) => void
   ): Promise<PluginListenerHandle>;
 }
 
@@ -305,6 +321,60 @@ export async function playOfficialHasanSample(volume = 0.95): Promise<{
   return SeslenLocalTts.playOfficialHasanSample({ volume });
 }
 
+export async function speakSeslenQueue(params: {
+  text: string;
+  utteranceId: string;
+  rate?: number;
+  volume?: number;
+}): Promise<{
+  ok: boolean;
+  utteranceId?: string;
+  engineUsed?: string;
+  antaliaUsed?: boolean;
+  modelMissing?: boolean;
+  error?: string;
+}> {
+  if (!isSeslenLocalPluginAvailable()) {
+    return {
+      ok: false,
+      utteranceId: params.utteranceId,
+      antaliaUsed: false,
+      error:
+        'Seslen-TTS Hasan eklentisi yalnızca Android APK üzerinde çalışır; Antalia-2 Mini motoruna geçilmedi.',
+    };
+  }
+  return SeslenLocalTts.speak(params);
+}
+
+export async function pauseSeslenQueue(): Promise<void> {
+  if (!isSeslenLocalPluginAvailable()) return;
+  try {
+    await SeslenLocalTts.pause();
+  } catch {
+    // ignore
+  }
+}
+
+export async function resumeSeslenQueue(): Promise<{ ok: boolean; utteranceId?: string }> {
+  if (!isSeslenLocalPluginAvailable()) {
+    return { ok: false };
+  }
+  try {
+    return await SeslenLocalTts.resume();
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function stopSeslenQueue(): Promise<void> {
+  if (!isSeslenLocalPluginAvailable()) return;
+  try {
+    await SeslenLocalTts.stop();
+  } catch {
+    // ignore
+  }
+}
+
 export async function stopSeslenTest(): Promise<void> {
   if (!isSeslenLocalPluginAvailable()) return;
   await SeslenLocalTts.stopTest();
@@ -313,11 +383,11 @@ export async function stopSeslenTest(): Promise<void> {
 export async function subscribeSeslenEvents(handlers: {
   onDownloadProgress?: (ev: SeslenDownloadProgressEvent) => void;
   onDownloadError?: (ev: { message: string }) => void;
-  onStart?: (ev: { token: number }) => void;
-  onMouth?: (ev: { level: number }) => void;
+  onStart?: (ev: { token: number; utteranceId?: string }) => void;
+  onMouth?: (ev: { level: number; utteranceId?: string }) => void;
   onLog?: (ev: { line: string }) => void;
-  onDone?: (ev: SeslenSpeakTestResult & { token: number; totalWallMs?: number }) => void;
-  onError?: (ev: { token: number; message: string }) => void;
+  onDone?: (ev: SeslenSpeakTestResult & { token: number; utteranceId?: string; totalWallMs?: number }) => void;
+  onError?: (ev: { token: number; utteranceId?: string; message: string }) => void;
 }): Promise<() => void> {
   if (!isSeslenLocalPluginAvailable()) {
     return () => {};

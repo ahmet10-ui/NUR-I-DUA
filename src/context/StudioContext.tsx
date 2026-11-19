@@ -20,6 +20,7 @@ import {
   serverNeuralTTSProvider,
   studioTTSRouter,
 } from '../services/ttsService';
+import { isNativeAndroidEnvironment } from '../services/nativeAndroidTtsBridge';
 import {
   AppState,
   BroadcastSettingsConfig,
@@ -736,9 +737,25 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       rate: voiceCfg.scholar1Rate,
       pitch: voiceCfg.scholar1Pitch,
     });
+    const isAndroidNative = isNativeAndroidEnvironment();
+    const effectiveRate =
+      startedEvent.scholarId === 'scholar_1' && isAndroidNative
+        ? voiceCfg.seslenHasanRate ?? 0.94
+        : prosody.rate;
+
+    if (isAndroidNative) {
+      appendLog(
+        'info',
+        'tts',
+        startedEvent.scholarId === 'scholar_1'
+          ? 'Dua kuyruğu motor yönlendirmesi: Hacı Ahmet Efendi (scholar_1) -> Seslen-TTS Hasan (Yerel ONNX)'
+          : 'Dua kuyruğu motor yönlendirmesi: Hacı Mehmet Efendi (scholar_2) -> Antalia-2 Mini (Android Sistem TTS)'
+      );
+    }
 
     setLastSpeechError(null);
     studioTTSRouter.speak(startedEvent.renderedPrayer, {
+      scholarId: startedEvent.scholarId,
       preferredEngine: voiceCfg.provider,
       voiceURI: chosenVoiceURI,
       neuralProviderId: voiceCfg.neuralProviderId,
@@ -746,7 +763,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       tone: voiceCfg.narrationTone,
       fallbackToBrowser: voiceCfg.fallbackToBrowser,
       lang: voiceCfg.language || 'tr-TR',
-      rate: prosody.rate,
+      rate: effectiveRate,
       pitch: prosody.pitch,
       volume: voiceCfg.volume,
       onStart: () => {
@@ -1009,6 +1026,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         pitch: voiceCfg.scholar1Pitch,
       });
 
+      const effectiveRate =
+        scholarId === 'scholar_1' && isNativeAndroidEnvironment()
+          ? voiceCfg.seslenHasanRate ?? 0.94
+          : prosody.rate;
+
       setLastSpeechError(null);
       setState((prev) => ({
         ...prev,
@@ -1016,6 +1038,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       }));
       setSpeakingState('speaking');
       studioTTSRouter.speak(sampleText, {
+        scholarId,
         preferredEngine: voiceCfg.provider,
         voiceURI: chosenVoiceURI,
         neuralProviderId: voiceCfg.neuralProviderId,
@@ -1023,7 +1046,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         tone: voiceCfg.narrationTone,
         fallbackToBrowser: voiceCfg.fallbackToBrowser,
         lang: voiceCfg.language || 'tr-TR',
-        rate: prosody.rate,
+        rate: effectiveRate,
         pitch: prosody.pitch,
         volume: voiceCfg.volume,
         onFallbackNotice: (reason) => {
@@ -1066,6 +1089,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       setSpeakingState('speaking');
 
       studioTTSRouter.speak('Esselâmü aleyküm. Allah dualarımızı kabul eylesin.', {
+        scholarId,
+        forceStandardSystemTts: true,
         preferredEngine: 'browser_speech_synthesis',
         voiceURI: chosenVoiceURI,
         lang: 'tr-TR',

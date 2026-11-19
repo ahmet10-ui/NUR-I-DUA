@@ -12667,7 +12667,8 @@ var createDefaultAppState = () => ({
 		scholar1IndependentEnabled: true,
 		scholar1VoiceURI: "",
 		scholar1Rate: .76,
-		scholar1Pitch: .68
+		scholar1Pitch: .68,
+		seslenHasanRate: .94
 	},
 	tiktok: {
 		username: "fcproplayer7",
@@ -13874,6 +13875,151 @@ async function subscribeNativeAndroidTtsEvents(handlers) {
 		});
 	};
 }
+// src/services/nativeSeslenTtsBridge.ts
+var SeslenLocalTts = registerPlugin("SeslenLocalTts");
+function isSeslenLocalPluginAvailable() {
+	try {
+		return Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android" && Capacitor.isPluginAvailable("SeslenLocalTts");
+	} catch {
+		return false;
+	}
+}
+async function getSeslenStatus() {
+	const platform = (() => {
+		try {
+			return Capacitor.getPlatform();
+		} catch {
+			return "web";
+		}
+	})();
+	const isAndroid = (() => {
+		try {
+			return Capacitor.isNativePlatform() && platform === "android";
+		} catch {
+			return false;
+		}
+	})();
+	if (!isAndroid || !Capacitor.isPluginAvailable("SeslenLocalTts")) return {
+		platform,
+		isNativeAndroid: isAndroid,
+		pluginAvailable: false,
+		modelInstalled: false,
+		isDownloading: false,
+		wifiConnected: false,
+		downloadedBytes: 0,
+		totalBytes: 325739036,
+		percent: 0,
+		storagePath: null,
+		sessionsLoaded: false,
+		hasLastTestWav: false,
+		hasOfficialSampleWav: false,
+		files: [],
+		memory: null,
+		logs: []
+	};
+	return {
+		...await SeslenLocalTts.getStatus(),
+		platform,
+		isNativeAndroid: true,
+		pluginAvailable: true
+	};
+}
+async function downloadSeslenModel() {
+	if (!isSeslenLocalPluginAvailable()) return {
+		ok: false,
+		error: "SeslenLocalTts yalnızca Android APK (Redmi Note 10T 5G) üzerinde çalışır."
+	};
+	return SeslenLocalTts.downloadModel();
+}
+async function cancelSeslenDownload() {
+	if (!isSeslenLocalPluginAvailable()) return;
+	await SeslenLocalTts.cancelDownload();
+}
+async function verifySeslenModelIntegrity() {
+	if (!isSeslenLocalPluginAvailable()) return {
+		ok: false,
+		files: [],
+		error: "SeslenLocalTts yalnızca Android APK içinde doğrulanabilir."
+	};
+	return SeslenLocalTts.verifyModelIntegrity();
+}
+async function verifySeslenContract(text) {
+	if (!isSeslenLocalPluginAvailable()) return {
+		ok: false,
+		error: "ONNX kontrat doğrulaması yalnızca Android APK içinde çalıştırılabilir."
+	};
+	return SeslenLocalTts.verifyInferenceContract({ text });
+}
+async function speakSeslenTest(params) {
+	if (!isSeslenLocalPluginAvailable()) return {
+		ok: false,
+		error: "Seslen Hasan testi yalnızca Android APK içinde çalıştırılabilir."
+	};
+	return SeslenLocalTts.speakTest(params);
+}
+async function replayLastSeslenWav(volume = .95) {
+	if (!isSeslenLocalPluginAvailable()) return {
+		ok: false,
+		error: "Yalnızca Android APK içinde kullanılabilir."
+	};
+	return SeslenLocalTts.replayLastTestWav({ volume });
+}
+async function playOfficialHasanSample(volume = .95) {
+	if (!isSeslenLocalPluginAvailable()) return {
+		ok: false,
+		error: "Yalnızca Android APK içinde kullanılabilir."
+	};
+	return SeslenLocalTts.playOfficialHasanSample({ volume });
+}
+async function speakSeslenQueue(params) {
+	if (!isSeslenLocalPluginAvailable()) return {
+		ok: false,
+		utteranceId: params.utteranceId,
+		antaliaUsed: false,
+		error: "Seslen-TTS Hasan eklentisi yalnızca Android APK üzerinde çalışır; Antalia-2 Mini motoruna geçilmedi."
+	};
+	return SeslenLocalTts.speak(params);
+}
+async function pauseSeslenQueue() {
+	if (!isSeslenLocalPluginAvailable()) return;
+	try {
+		await SeslenLocalTts.pause();
+	} catch {}
+}
+async function resumeSeslenQueue() {
+	if (!isSeslenLocalPluginAvailable()) return { ok: false };
+	try {
+		return await SeslenLocalTts.resume();
+	} catch {
+		return { ok: false };
+	}
+}
+async function stopSeslenQueue() {
+	if (!isSeslenLocalPluginAvailable()) return;
+	try {
+		await SeslenLocalTts.stop();
+	} catch {}
+}
+async function stopSeslenTest() {
+	if (!isSeslenLocalPluginAvailable()) return;
+	await SeslenLocalTts.stopTest();
+}
+async function subscribeSeslenEvents(handlers) {
+	if (!isSeslenLocalPluginAvailable()) return () => {};
+	const handles = [];
+	if (handlers.onDownloadProgress) handles.push(await SeslenLocalTts.addListener("seslenDownloadProgress", handlers.onDownloadProgress));
+	if (handlers.onDownloadError) handles.push(await SeslenLocalTts.addListener("seslenDownloadError", handlers.onDownloadError));
+	if (handlers.onStart) handles.push(await SeslenLocalTts.addListener("seslenStart", handlers.onStart));
+	if (handlers.onMouth) handles.push(await SeslenLocalTts.addListener("seslenMouth", handlers.onMouth));
+	if (handlers.onLog) handles.push(await SeslenLocalTts.addListener("seslenLog", handlers.onLog));
+	if (handlers.onDone) handles.push(await SeslenLocalTts.addListener("seslenDone", handlers.onDone));
+	if (handlers.onError) handles.push(await SeslenLocalTts.addListener("seslenError", handlers.onError));
+	return () => {
+		handles.forEach((h) => {
+			h.remove().catch(() => {});
+		});
+	};
+}
 // src/services/ttsService.ts
 var MALE_VOICE_HINTS = [
 	"ahmet",
@@ -14583,24 +14729,162 @@ var NativeAndroidTTSProvider = class {
 	}
 };
 /**
-* Unified TTS router:
-* - In Capacitor Android native builds, automatically uses NativeAndroidTTSProvider
-*   (`android.speech.tts.TextToSpeech`, respecting the system default engine such as Antalia-2 Mini).
-* - In Chrome Preview / standard web browsers, transparently uses BrowserSpeechSynthesisProvider.
-* - Supports optional ServerNeuralTTSProvider with automatic fallback.
+* On-device Seslen-TTS ("hasan" elderly Turkish male voice) provider for Hacı Ahmet Efendi (scholar_1).
+* Uses Chaquopy + ONNX Runtime (metin.onnx + ses.onnx) and AudioTrack 24 kHz mono PCM playback.
+* Never delegates or falls back to Android TextToSpeech / Antalia-2 Mini on error.
+*/
+var SeslenLocalTTSProvider = class {
+	constructor() {
+		this.id = "browser_speech_synthesis";
+		this.label = "Seslen-TTS Hasan (Yerel ONNX Runtime)";
+		this.isStudioGrade = true;
+		this.activeUtteranceId = null;
+		this.playbackToken = 0;
+		this.utteranceCounter = 0;
+		this.isPaused = false;
+		this.safetyTimeout = null;
+		this.unsubListeners = null;
+	}
+	isSupported() {
+		return isSeslenLocalPluginAvailable();
+	}
+	clearSafetyTimeout() {
+		if (this.safetyTimeout !== null) {
+			window.clearTimeout(this.safetyTimeout);
+			this.safetyTimeout = null;
+		}
+	}
+	detachListeners() {
+		if (this.unsubListeners) {
+			this.unsubListeners();
+			this.unsubListeners = null;
+		}
+	}
+	speak(text, options) {
+		this.stop();
+		const token = ++this.playbackToken;
+		const cleanText = text.replace(/\s+/g, " ").trim();
+		if (!cleanText) {
+			options.onEnd?.();
+			return;
+		}
+		if (!this.isSupported()) {
+			options.onError?.("Seslen-TTS Hasan eklentisi Android üzerinde kullanılabilir değil. Hacı Ahmet Efendi için Antalia-2 Mini sesine geçilmedi.");
+			return;
+		}
+		const utteranceId = `seslen_${Date.now()}_${++this.utteranceCounter}`;
+		this.activeUtteranceId = utteranceId;
+		this.isPaused = false;
+		let finished = false;
+		let startedNotified = false;
+		const finish = (isErr = false, msg) => {
+			if (finished || this.playbackToken !== token) return;
+			finished = true;
+			this.activeUtteranceId = null;
+			this.isPaused = false;
+			this.clearSafetyTimeout();
+			this.detachListeners();
+			options.onMouthLevel?.(0);
+			if (isErr) options.onError?.(msg || "Seslen-TTS Hasan sentezi/oynatımı başarısız oldu.");
+			else options.onEnd?.();
+		};
+		const armSafetyTimeout = () => {
+			this.clearSafetyTimeout();
+			const maxDurationMs = Math.max(45e3, Math.min(18e4, cleanText.length / Math.max(.65, options.rate || .94) * 380));
+			this.safetyTimeout = window.setTimeout(() => {
+				if (!finished && this.playbackToken === token && !this.isPaused) {
+					stopSeslenQueue();
+					finish(true, "Seslen-TTS Hasan oynatma zaman aşımına uğradı.");
+				}
+			}, maxDurationMs);
+		};
+		armSafetyTimeout();
+		const run = async () => {
+			try {
+				const unsub = await subscribeSeslenEvents({
+					onStart: (ev) => {
+						if (finished || this.playbackToken !== token) return;
+						if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+						if (!startedNotified) {
+							startedNotified = true;
+							options.onStart?.();
+						}
+					},
+					onMouth: (ev) => {
+						if (finished || this.playbackToken !== token || this.isPaused) return;
+						if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+						options.onMouthLevel?.(ev.level);
+					},
+					onDone: (ev) => {
+						if (finished || this.playbackToken !== token) return;
+						if (ev.utteranceId !== this.activeUtteranceId) return;
+						finish(false);
+					},
+					onError: (ev) => {
+						if (finished || this.playbackToken !== token) return;
+						if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+						finish(true, ev.message || "Seslen-TTS Hasan oynatma hatası.");
+					}
+				});
+				if (finished || this.playbackToken !== token) {
+					unsub();
+					return;
+				}
+				this.unsubListeners = unsub;
+				const res = await speakSeslenQueue({
+					text: cleanText,
+					utteranceId,
+					rate: options.rate,
+					volume: options.volume
+				});
+				if (finished || this.playbackToken !== token) return;
+				if (!res.ok) finish(true, res.error || "Seslen-TTS Hasan konuşması başlatılamadı.");
+			} catch (err) {
+				finish(true, err instanceof Error ? err.message : "Seslen-TTS Hasan yerel köprü hatası.");
+			}
+		};
+		run();
+	}
+	pause() {
+		this.isPaused = true;
+		this.clearSafetyTimeout();
+		pauseSeslenQueue();
+	}
+	resume() {
+		this.isPaused = false;
+		resumeSeslenQueue();
+	}
+	stop() {
+		this.playbackToken++;
+		this.activeUtteranceId = null;
+		this.isPaused = false;
+		this.clearSafetyTimeout();
+		this.detachListeners();
+		stopSeslenQueue();
+	}
+};
+/**
+* Unified per-scholar TTS router:
+* - On native Android APK builds:
+*   - Hacı Ahmet Efendi (`scholar_1`) uses strictly local `SeslenLocalTTSProvider` ("hasan" ONNX)
+*     and NEVER falls back to Antalia-2 Mini on error.
+*   - Hacı Mehmet Efendi (`scholar_2`) keeps `NativeAndroidTTSProvider` (Antalia-2 Mini) untouched.
+* - In Chrome Preview / standard web browsers (`!isNativeAndroidEnvironment()`), falls back to
+*   BrowserSpeechSynthesisProvider or optional ServerNeuralTTSProvider for desktop previewing.
 */
 var StudioTTSRouter = class {
-	constructor(browserProvider, nativeAndroidProvider, neuralProvider) {
+	constructor(browserProvider, nativeAndroidProvider, neuralProvider, seslenLocalProvider) {
 		this.browserProvider = browserProvider;
 		this.nativeAndroidProvider = nativeAndroidProvider;
 		this.neuralProvider = neuralProvider;
+		this.seslenLocalProvider = seslenLocalProvider;
 		this.id = "browser_speech_synthesis";
 		this.label = "NUR-I DUA Studio TTS Router";
 		this.isStudioGrade = false;
 		this.activeEngine = "browser";
 	}
 	isSupported() {
-		return this.nativeAndroidProvider.isSupported() || this.browserProvider.isSupported() || this.neuralProvider.isSupported();
+		return this.seslenLocalProvider.isSupported() || this.nativeAndroidProvider.isSupported() || this.browserProvider.isSupported() || this.neuralProvider.isSupported();
 	}
 	getActiveEngine() {
 		return this.activeEngine;
@@ -14616,7 +14900,16 @@ var StudioTTSRouter = class {
 	}
 	speak(text, options) {
 		this.stop();
-		if (options.preferredEngine === "external_studio_adapter") {
+		if (options.scholarId === "scholar_1" && !options.forceStandardSystemTts && isNativeAndroidEnvironment()) {
+			this.activeEngine = "seslen_hasan";
+			if (!this.seslenLocalProvider.isSupported()) {
+				options.onError?.("Seslen-TTS Hasan eklentisi Android üzerinde aktif değil. Hacı Ahmet Efendi için Antalia-2 Mini sesine geçiş yapılmadı.");
+				return;
+			}
+			this.seslenLocalProvider.speak(text, options);
+			return;
+		}
+		if (options.preferredEngine === "external_studio_adapter" && !options.forceStandardSystemTts) {
 			this.activeEngine = "neural";
 			this.neuralProvider.speak(text, {
 				...options,
@@ -14634,16 +14927,19 @@ var StudioTTSRouter = class {
 		this.speakWithLocalOrNative(text, options);
 	}
 	pause() {
-		if (this.activeEngine === "neural") this.neuralProvider.pause();
+		if (this.activeEngine === "seslen_hasan") this.seslenLocalProvider.pause();
+		else if (this.activeEngine === "neural") this.neuralProvider.pause();
 		else if (this.activeEngine === "native_android") this.nativeAndroidProvider.pause();
 		else this.browserProvider.pause();
 	}
 	resume() {
-		if (this.activeEngine === "neural") this.neuralProvider.resume();
+		if (this.activeEngine === "seslen_hasan") this.seslenLocalProvider.resume();
+		else if (this.activeEngine === "neural") this.neuralProvider.resume();
 		else if (this.activeEngine === "native_android") this.nativeAndroidProvider.resume();
 		else this.browserProvider.resume();
 	}
 	stop() {
+		this.seslenLocalProvider.stop();
 		this.neuralProvider.stop();
 		this.nativeAndroidProvider.stop();
 		this.browserProvider.stop();
@@ -14652,7 +14948,7 @@ var StudioTTSRouter = class {
 var browserTTSProvider = new BrowserSpeechSynthesisProvider();
 var nativeAndroidTTSProvider = new NativeAndroidTTSProvider();
 var serverNeuralTTSProvider = new ServerNeuralTTSProvider();
-var studioTTSRouter = new StudioTTSRouter(browserTTSProvider, nativeAndroidTTSProvider, serverNeuralTTSProvider);
+var studioTTSRouter = new StudioTTSRouter(browserTTSProvider, nativeAndroidTTSProvider, serverNeuralTTSProvider, new SeslenLocalTTSProvider());
 // node_modules/react/cjs/react-jsx-runtime.production.js
 /**
 * @license React
@@ -15163,8 +15459,12 @@ var StudioProvider = ({ children, isBroadcastView = false }) => {
 			rate: voiceCfg.scholar1Rate,
 			pitch: voiceCfg.scholar1Pitch
 		});
+		const isAndroidNative = isNativeAndroidEnvironment();
+		const effectiveRate = startedEvent.scholarId === "scholar_1" && isAndroidNative ? voiceCfg.seslenHasanRate ?? .94 : prosody.rate;
+		if (isAndroidNative) appendLog("info", "tts", startedEvent.scholarId === "scholar_1" ? "Dua kuyruğu motor yönlendirmesi: Hacı Ahmet Efendi (scholar_1) -> Seslen-TTS Hasan (Yerel ONNX)" : "Dua kuyruğu motor yönlendirmesi: Hacı Mehmet Efendi (scholar_2) -> Antalia-2 Mini (Android Sistem TTS)");
 		setLastSpeechError(null);
 		studioTTSRouter.speak(startedEvent.renderedPrayer, {
+			scholarId: startedEvent.scholarId,
 			preferredEngine: voiceCfg.provider,
 			voiceURI: chosenVoiceURI,
 			neuralProviderId: voiceCfg.neuralProviderId,
@@ -15172,7 +15472,7 @@ var StudioProvider = ({ children, isBroadcastView = false }) => {
 			tone: voiceCfg.narrationTone,
 			fallbackToBrowser: voiceCfg.fallbackToBrowser,
 			lang: voiceCfg.language || "tr-TR",
-			rate: prosody.rate,
+			rate: effectiveRate,
 			pitch: prosody.pitch,
 			volume: voiceCfg.volume,
 			onStart: () => {
@@ -15422,6 +15722,7 @@ var StudioProvider = ({ children, isBroadcastView = false }) => {
 			rate: voiceCfg.scholar1Rate,
 			pitch: voiceCfg.scholar1Pitch
 		});
+		const effectiveRate = scholarId === "scholar_1" && isNativeAndroidEnvironment() ? voiceCfg.seslenHasanRate ?? .94 : prosody.rate;
 		setLastSpeechError(null);
 		setState((prev) => ({
 			...prev,
@@ -15432,6 +15733,7 @@ var StudioProvider = ({ children, isBroadcastView = false }) => {
 		}));
 		setSpeakingState("speaking");
 		studioTTSRouter.speak(sampleText, {
+			scholarId,
 			preferredEngine: voiceCfg.provider,
 			voiceURI: chosenVoiceURI,
 			neuralProviderId: voiceCfg.neuralProviderId,
@@ -15439,7 +15741,7 @@ var StudioProvider = ({ children, isBroadcastView = false }) => {
 			tone: voiceCfg.narrationTone,
 			fallbackToBrowser: voiceCfg.fallbackToBrowser,
 			lang: voiceCfg.language || "tr-TR",
-			rate: prosody.rate,
+			rate: effectiveRate,
 			pitch: prosody.pitch,
 			volume: voiceCfg.volume,
 			onFallbackNotice: (reason) => {
@@ -15479,6 +15781,8 @@ var StudioProvider = ({ children, isBroadcastView = false }) => {
 		}));
 		setSpeakingState("speaking");
 		studioTTSRouter.speak("Esselâmü aleyküm. Allah dualarımızı kabul eylesin.", {
+			scholarId,
+			forceStandardSystemTts: true,
 			preferredEngine: "browser_speech_synthesis",
 			voiceURI: chosenVoiceURI,
 			lang: "tr-TR",
@@ -27918,122 +28222,6 @@ var ScholarsPage = () => {
 		]
 	});
 };
-// src/services/nativeSeslenTtsBridge.ts
-var SeslenLocalTts = registerPlugin("SeslenLocalTts");
-function isSeslenLocalPluginAvailable() {
-	try {
-		return Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android" && Capacitor.isPluginAvailable("SeslenLocalTts");
-	} catch {
-		return false;
-	}
-}
-async function getSeslenStatus() {
-	const platform = (() => {
-		try {
-			return Capacitor.getPlatform();
-		} catch {
-			return "web";
-		}
-	})();
-	const isAndroid = (() => {
-		try {
-			return Capacitor.isNativePlatform() && platform === "android";
-		} catch {
-			return false;
-		}
-	})();
-	if (!isAndroid || !Capacitor.isPluginAvailable("SeslenLocalTts")) return {
-		platform,
-		isNativeAndroid: isAndroid,
-		pluginAvailable: false,
-		modelInstalled: false,
-		isDownloading: false,
-		wifiConnected: false,
-		downloadedBytes: 0,
-		totalBytes: 325739036,
-		percent: 0,
-		storagePath: null,
-		sessionsLoaded: false,
-		hasLastTestWav: false,
-		hasOfficialSampleWav: false,
-		files: [],
-		memory: null,
-		logs: []
-	};
-	return {
-		...await SeslenLocalTts.getStatus(),
-		platform,
-		isNativeAndroid: true,
-		pluginAvailable: true
-	};
-}
-async function downloadSeslenModel() {
-	if (!isSeslenLocalPluginAvailable()) return {
-		ok: false,
-		error: "SeslenLocalTts yalnızca Android APK (Redmi Note 10T 5G) üzerinde çalışır."
-	};
-	return SeslenLocalTts.downloadModel();
-}
-async function cancelSeslenDownload() {
-	if (!isSeslenLocalPluginAvailable()) return;
-	await SeslenLocalTts.cancelDownload();
-}
-async function verifySeslenModelIntegrity() {
-	if (!isSeslenLocalPluginAvailable()) return {
-		ok: false,
-		files: [],
-		error: "SeslenLocalTts yalnızca Android APK içinde doğrulanabilir."
-	};
-	return SeslenLocalTts.verifyModelIntegrity();
-}
-async function verifySeslenContract(text) {
-	if (!isSeslenLocalPluginAvailable()) return {
-		ok: false,
-		error: "ONNX kontrat doğrulaması yalnızca Android APK içinde çalıştırılabilir."
-	};
-	return SeslenLocalTts.verifyInferenceContract({ text });
-}
-async function speakSeslenTest(params) {
-	if (!isSeslenLocalPluginAvailable()) return {
-		ok: false,
-		error: "Seslen Hasan testi yalnızca Android APK içinde çalıştırılabilir."
-	};
-	return SeslenLocalTts.speakTest(params);
-}
-async function replayLastSeslenWav(volume = .95) {
-	if (!isSeslenLocalPluginAvailable()) return {
-		ok: false,
-		error: "Yalnızca Android APK içinde kullanılabilir."
-	};
-	return SeslenLocalTts.replayLastTestWav({ volume });
-}
-async function playOfficialHasanSample(volume = .95) {
-	if (!isSeslenLocalPluginAvailable()) return {
-		ok: false,
-		error: "Yalnızca Android APK içinde kullanılabilir."
-	};
-	return SeslenLocalTts.playOfficialHasanSample({ volume });
-}
-async function stopSeslenTest() {
-	if (!isSeslenLocalPluginAvailable()) return;
-	await SeslenLocalTts.stopTest();
-}
-async function subscribeSeslenEvents(handlers) {
-	if (!isSeslenLocalPluginAvailable()) return () => {};
-	const handles = [];
-	if (handlers.onDownloadProgress) handles.push(await SeslenLocalTts.addListener("seslenDownloadProgress", handlers.onDownloadProgress));
-	if (handlers.onDownloadError) handles.push(await SeslenLocalTts.addListener("seslenDownloadError", handlers.onDownloadError));
-	if (handlers.onStart) handles.push(await SeslenLocalTts.addListener("seslenStart", handlers.onStart));
-	if (handlers.onMouth) handles.push(await SeslenLocalTts.addListener("seslenMouth", handlers.onMouth));
-	if (handlers.onLog) handles.push(await SeslenLocalTts.addListener("seslenLog", handlers.onLog));
-	if (handlers.onDone) handles.push(await SeslenLocalTts.addListener("seslenDone", handlers.onDone));
-	if (handlers.onError) handles.push(await SeslenLocalTts.addListener("seslenError", handlers.onError));
-	return () => {
-		handles.forEach((h) => {
-			h.remove().catch(() => {});
-		});
-	};
-}
 // src/components/pages/VoicePage.tsx
 var VoicePage = () => {
 	const { state, availableVoices, voiceLoadStatus, voiceLoadError, lastSpeechError, refreshVoices, isSpeechPaused, updateVoiceConfig, testVoicePlayback, testSystemTurkishSpeech, testServerNeuralPlayback, pauseSpeech, resumeSpeech, stopCurrentSpeech } = useStudio();
@@ -28073,7 +28261,7 @@ var VoicePage = () => {
 	const [seslenContract, setSeslenContract] = (0, import_react.useState)(null);
 	const [seslenContractLoading, setSeslenContractLoading] = (0, import_react.useState)(false);
 	const [seslenTestSentence, setSeslenTestSentence] = (0, import_react.useState)("Esselâmü aleyküm. Allah dualarımızı kabul eylesin.");
-	const [seslenRate, setSeslenRate] = (0, import_react.useState)(.94);
+	const seslenRate = voice.seslenHasanRate ?? .94;
 	const [seslenSpeaking, setSeslenSpeaking] = (0, import_react.useState)(false);
 	const [seslenMouthLevel, setSeslenMouthLevel] = (0, import_react.useState)(0);
 	const [seslenTestResult, setSeslenTestResult] = (0, import_react.useState)(null);
@@ -28742,7 +28930,7 @@ var VoicePage = () => {
 									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [
 										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
 											className: "text-[11px] uppercase tracking-[0.14em] text-[#D4B26A]",
-											children: "Aşama 1–4 · Yerel On-Device TTS Testi (Kuyruktan Bağımsız)"
+											children: "Aşama 5 Aktif · Hacı Ahmet Kuyruğu: Seslen-TTS Hasan"
 										}),
 										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h2", {
 											className: "text-base font-semibold text-white",
@@ -28756,7 +28944,7 @@ var VoicePage = () => {
 													className: "text-slate-200",
 													children: "Redmi Note 10T 5G (6 GB RAM, arm64-v8a)"
 												}),
-												". Hacı Mehmet Efendi'nin Antalia-2 Mini sesine ve dua kuyruğuna dokunulmaz."
+												". Hacı Ahmet dua kuyruğunda Seslen-TTS Hasan kullanır; Hacı Mehmet Efendi'nin Antalia-2 Mini sesi aynen korunur."
 											]
 										})
 									] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
@@ -28941,7 +29129,7 @@ var VoicePage = () => {
 													max: 1.12,
 													step: .02,
 													value: seslenRate,
-													onChange: (e) => setSeslenRate(Number(e.target.value)),
+													onChange: (e) => updateVoiceConfig({ seslenHasanRate: Number(e.target.value) }),
 													className: "w-full accent-[#C9A45C]"
 												})] }),
 												/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
@@ -29169,10 +29357,10 @@ var VoicePage = () => {
 									children: [
 										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("strong", {
 											className: "text-slate-300",
-											children: "Lisans Atıfları:"
+											children: "Lisans & Yönlendirme:"
 										}),
 										" ",
-										"Seslen-TTS yazılım kodu (MIT — Mehmet Veysel Delibaş) · Model ağırlıkları & “hasan” sesi (CC BY-SA 4.0) · turkce-vurgu (MIT AND CC-BY-SA-4.0) · turkce-normalize (MIT) · Chaquopy 17.2.0 (MIT) · ONNX Runtime Android 1.32.0 (MIT). Dua kuyruğuna entegrasyon tek cümle ve bellek testi onayından sonra yapılacaktır."
+										"Seslen-TTS yazılım kodu (MIT — Mehmet Veysel Delibaş) · Model ağırlıkları & “hasan” sesi (CC BY-SA 4.0) · turkce-vurgu (MIT AND CC-BY-SA-4.0) · turkce-normalize (MIT) · Chaquopy 17.2.0 (MIT) · ONNX Runtime Android 1.32.0 (MIT). Hacı Ahmet Efendi (scholar_1) kuyrukta yalnızca Seslen-TTS Hasan kullanır (hata hâlinde Antalia'ya geri düşmez); Hacı Mehmet Efendi (scholar_2) Antalia-2 Mini motorunda korunur."
 									]
 								})
 							]

@@ -1,5 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { createDefaultAppState, PRAYER_CATEGORIES, SAMPLE_TIKTOK_USERNAMES } from '../data/defaults';
+import {
+  createDefaultAppState,
+  DEFAULT_MID_OPENING_PRAYERS,
+  PRAYER_CATEGORIES,
+  SAMPLE_TIKTOK_USERNAMES,
+} from '../data/defaults';
 import {
   clearLocalState,
   fetchServerState,
@@ -12,6 +17,20 @@ import {
 } from '../services/syncClient';
 import { TikTokLiveConnectorService } from '../services/tiktokLiveConnectorService';
 import {
+  classifyFollowInteraction,
+  classifyGiftInteraction,
+  resolveTierRules,
+} from '../services/interactionClassifier';
+import {
+  buildHighTierTurkishSpeech,
+  executeStage2PlaybackSequence,
+  normalizeFollowSessionKey,
+  pickNonConsecutiveHighDua,
+  pickNonConsecutiveMidPrayer,
+  pickNonConsecutivePrayerByCategory,
+  Stage2PlaybackHandle,
+} from '../services/stage2Flow';
+import {
   AvailableVoice,
   browserTTSProvider,
   getAvailableSpeechVoices,
@@ -19,6 +38,7 @@ import {
   resolveScholarVoiceURI,
   serverNeuralTTSProvider,
   studioTTSRouter,
+  verifiedArabicAudioPlayer,
 } from '../services/ttsService';
 import { isNativeAndroidEnvironment } from '../services/nativeAndroidTtsBridge';
 import {
@@ -26,12 +46,14 @@ import {
   BroadcastSettingsConfig,
   EventSource,
   GiftRule,
+  HighTierDuaEntry,
   PrayerCategoryId,
   PrayerTemplate,
   QueueEvent,
   ScholarId,
   ScholarSettingsConfig,
   SystemLogEntry,
+  TierRuleConfig,
   TikTokConnectionConfig,
   VoiceSettingsConfig,
 } from '../types/nuridua';
@@ -73,19 +95,37 @@ interface StudioContextValue {
   togglePrayerActive: (id: string) => void;
   pickRandomPrayer: (category: PrayerCategoryId) => PrayerTemplate | null;
 
-  // Gift CRUD
+  // High-Tier Arabic + Turkish Duas CRUD (150-299 coins)
+  addHighTierDua: (input: Omit<HighTierDuaEntry, 'id' | 'updatedAt'>) => void;
+  updateHighTierDua: (id: string, patch: Partial<Omit<HighTierDuaEntry, 'id'>>) => void;
+  deleteHighTierDua: (id: string) => void;
+  toggleHighTierDuaActive: (id: string) => void;
+
+  // Gift CRUD & Tier Rules
   addGift: (input: Omit<GiftRule, 'id' | 'updatedAt'>) => void;
   updateGift: (id: string, patch: Partial<Omit<GiftRule, 'id'>>) => void;
   deleteGift: (id: string) => void;
   toggleGiftEnabled: (id: string) => void;
+  updateTierRules: (patch: Partial<TierRuleConfig>) => void;
 
   // Queue & Playback
   enqueueGiftEvent: (params: {
     source: EventSource;
     username?: string;
+    userId?: string;
     giftIdOrName?: string;
     displayGiftName?: string;
     quantity?: number;
+    unitCoins?: number;
+    repeatCount?: number;
+    giftType?: number;
+    repeatEnd?: boolean;
+    externalDedupeKey?: string;
+  }) => EnqueueResult;
+  enqueueFollowEvent: (params: {
+    source: EventSource;
+    username?: string;
+    userId?: string;
     externalDedupeKey?: string;
   }) => EnqueueResult;
   simulateSampleCayGift: () => EnqueueResult;
@@ -150,11 +190,25 @@ function recoverInitialState(): AppState {
       )
     : [];
 
+  const savedPrayers =
+    Array.isArray(saved.prayers) && saved.prayers.length > 0 ? saved.prayers : defaults.prayers;
+  const hasMidOpening = savedPrayers.some((p) => p && p.category === 'mid_opening');
+  const mergedPrayers = hasMidOpening
+    ? savedPrayers
+    : [...DEFAULT_MID_OPENING_PRAYERS, ...savedPrayers];
+
+  const savedHighTier =
+    Array.isArray(saved.highTierDuas) && saved.highTierDuas.length > 0
+      ? saved.highTierDuas
+      : defaults.highTierDuas;
+
   return {
     ...defaults,
     ...saved,
-    prayers: Array.isArray(saved.prayers) && saved.prayers.length > 0 ? saved.prayers : defaults.prayers,
+    prayers: mergedPrayers,
     gifts: Array.isArray(saved.gifts) && saved.gifts.length > 0 ? saved.gifts : defaults.gifts,
+    tierRules: resolveTierRules(saved.tierRules),
+    highTierDuas: savedHighTier,
     queue: recoveredQueue,
     history: uniqueHistory,
     scholars: {
@@ -210,6 +264,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
 
   const mouthListenersRef = useRef<Set<MouthListener>>(new Set());
   const recentDedupeRef = useRef<Map<string, number>>(new Map());
+  const seenFollowerKeysRef = useRef<Set<string>>(new Set());
+  const lastMidPrayerIdRef = useRef<string | null>(null);
+  const lastPrayerIdRef = useRef<string | null>(null);
+  const lastHighDuaIdRef = useRef<string | null>(null);
+  const playbackHandleRef = useRef<Stage2PlaybackHandle | null>(null);
   const holdTimeoutRef = useRef<number | null>(null);
   const lastBroadcastSyncRef = useRef<number>(0);
   const tiktokConnectorRef = useRef<TikTokLiveConnectorService | null>(null);
@@ -293,6 +352,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         window.clearTimeout(holdTimeoutRef.current);
         holdTimeoutRef.current = null;
       }
+      playbackHandleRef.current?.cancel();
+      playbackHandleRef.current = null;
+      verifiedArabicAudioPlayer.stop();
       studioTTSRouter.stop();
       if (browserTTSProvider.isSupported() && handleVoicesChanged) {
         const synth = window.speechSynthesis;
@@ -438,12 +500,105 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   }, []);
 
   const pickRandomPrayer = useCallback((category: PrayerCategoryId): PrayerTemplate | null => {
-    const allActive = stateRef.current.prayers.filter((p) => p.isActive);
-    if (allActive.length === 0) return null;
-    const categoryPool = allActive.filter((p) => p.category === category);
-    const pool = categoryPool.length > 0 ? categoryPool : allActive;
-    const idx = Math.floor(Math.random() * pool.length);
-    return pool[idx];
+    if (category === 'mid_opening') {
+      const picked = pickNonConsecutiveMidPrayer(stateRef.current.prayers, lastMidPrayerIdRef.current);
+      if (picked) lastMidPrayerIdRef.current = picked.id;
+      return picked;
+    }
+    const picked = pickNonConsecutivePrayerByCategory(
+      stateRef.current.prayers,
+      category,
+      lastPrayerIdRef.current
+    );
+    if (picked) lastPrayerIdRef.current = picked.id;
+    return picked;
+  }, []);
+
+  // High-Tier Arabic + Turkish Duas CRUD (150-299 coins)
+  const addHighTierDua = useCallback(
+    (input: Omit<HighTierDuaEntry, 'id' | 'updatedAt'>) => {
+      const now = new Date().toISOString();
+      const entry: HighTierDuaEntry = {
+        ...input,
+        id: createUniqueId('highdua'),
+        title: input.title.trim().slice(0, 120) || 'Yeni Yüksek Seviye Dua',
+        sourceCitation: input.sourceCitation.trim(),
+        arabicHarekeli: sanitizePrayerTemplate(input.arabicHarekeli),
+        turkishMeaning: sanitizePrayerTemplate(input.turkishMeaning),
+        personalPrayerTemplate: sanitizePrayerTemplate(input.personalPrayerTemplate),
+        audioUrl: input.audioUrl.trim(),
+        audioLicense: input.audioLicense.trim(),
+        audioAttribution: input.audioAttribution.trim(),
+        audioStatus:
+          input.audioUrl.trim() && input.audioLicense.trim() && input.audioStatus === 'verified_ready'
+            ? 'verified_ready'
+            : 'pending_license_verification',
+        updatedAt: now,
+      };
+      setState((prev) => ({
+        ...prev,
+        highTierDuas: [entry, ...(prev.highTierDuas || [])],
+        lastUpdatedAt: now,
+      }));
+      appendLog('info', 'system', `High-tier dua added: "${entry.title}".`);
+    },
+    [appendLog]
+  );
+
+  const updateHighTierDua = useCallback(
+    (id: string, patch: Partial<Omit<HighTierDuaEntry, 'id'>>) => {
+      const now = new Date().toISOString();
+      setState((prev) => ({
+        ...prev,
+        highTierDuas: (prev.highTierDuas || []).map((d) =>
+          d.id === id
+            ? {
+                ...d,
+                ...patch,
+                title: patch.title !== undefined ? patch.title.trim().slice(0, 120) : d.title,
+                arabicHarekeli:
+                  patch.arabicHarekeli !== undefined
+                    ? sanitizePrayerTemplate(patch.arabicHarekeli)
+                    : d.arabicHarekeli,
+                turkishMeaning:
+                  patch.turkishMeaning !== undefined
+                    ? sanitizePrayerTemplate(patch.turkishMeaning)
+                    : d.turkishMeaning,
+                personalPrayerTemplate:
+                  patch.personalPrayerTemplate !== undefined
+                    ? sanitizePrayerTemplate(patch.personalPrayerTemplate)
+                    : d.personalPrayerTemplate,
+                updatedAt: now,
+              }
+            : d
+        ),
+        lastUpdatedAt: now,
+      }));
+    },
+    []
+  );
+
+  const deleteHighTierDua = useCallback(
+    (id: string) => {
+      setState((prev) => ({
+        ...prev,
+        highTierDuas: (prev.highTierDuas || []).filter((d) => d.id !== id),
+        lastUpdatedAt: new Date().toISOString(),
+      }));
+      appendLog('info', 'system', `High-tier dua removed (${id}).`);
+    },
+    [appendLog]
+  );
+
+  const toggleHighTierDuaActive = useCallback((id: string) => {
+    const now = new Date().toISOString();
+    setState((prev) => ({
+      ...prev,
+      highTierDuas: (prev.highTierDuas || []).map((d) =>
+        d.id === id ? { ...d, isActive: !d.isActive, updatedAt: now } : d
+      ),
+      lastUpdatedAt: now,
+    }));
   }, []);
 
   // Gift CRUD
@@ -509,14 +664,28 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     }));
   }, []);
 
-  // Smart Queue Enqueue with Duplicate Protection & Priority Ordering
-  const enqueueGiftEvent = useCallback(
+  const updateTierRules = useCallback((patch: Partial<TierRuleConfig>) => {
+    setState((prev) => ({
+      ...prev,
+      tierRules: resolveTierRules({ ...resolveTierRules(prev.tierRules), ...patch }),
+      lastUpdatedAt: new Date().toISOString(),
+    }));
+  }, []);
+
+  const pickNextScholar = useCallback((current: AppState): ScholarId => {
+    if (current.scholars.activeMode === 'scholar_1') return 'scholar_1';
+    if (current.scholars.activeMode === 'scholar_2') return 'scholar_2';
+    const lastQueued = current.queue[current.queue.length - 1] || current.history[0];
+    const refSpeaker = lastQueued?.scholarId || current.scholars.currentSpeaker;
+    return refSpeaker === 'scholar_1' ? 'scholar_2' : 'scholar_1';
+  }, []);
+
+  // Follow Queue Enqueue with Session-Persistent Duplicate Protection
+  const enqueueFollowEvent = useCallback(
     (params: {
       source: EventSource;
       username?: string;
-      giftIdOrName?: string;
-      displayGiftName?: string;
-      quantity?: number;
+      userId?: string;
       externalDedupeKey?: string;
     }): EnqueueResult => {
       setHasUserGesture(true);
@@ -526,9 +695,98 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           ? params.username
           : SAMPLE_TIKTOK_USERNAMES[Math.floor(Math.random() * SAMPLE_TIKTOK_USERNAMES.length)];
       const safeUser = sanitizeUsername(rawUser);
-      const qty = Math.max(1, Math.min(999, Math.floor(Number(params.quantity) || 1)));
 
-      // Identify gift rule
+      const sessionFollowKey = normalizeFollowSessionKey({
+        userId: params.userId,
+        username: safeUser,
+      });
+
+      if (seenFollowerKeysRef.current.has(sessionFollowKey)) {
+        appendLog('info', 'queue', `Repeat follower filtered in session: @${safeUser}`);
+        return { ok: false, reason: `Bu oturumda @${safeUser} zaten selamlandı.` };
+      }
+
+      const classified = classifyFollowInteraction(
+        { username: safeUser, userId: params.userId },
+        current.tierRules
+      );
+      if (!classified.shouldEnqueue) {
+        appendLog('info', 'queue', `Follower greeting disabled; skipped @${safeUser}.`);
+        return { ok: false, reason: 'Takipçi selamlama seviyesi yönetici panelinde devre dışı.' };
+      }
+
+      seenFollowerKeysRef.current.add(sessionFollowKey);
+
+      const chosenScholar = pickNextScholar(current);
+      const followEvent: QueueEvent = {
+        id: createUniqueId('flw'),
+        dedupeKey: params.externalDedupeKey
+          ? `${params.source}:follow:${params.externalDedupeKey}`
+          : `${params.source}:follow:${sessionFollowKey}`,
+        source: params.source,
+        eventType: 'follow',
+        tier: 'follower',
+        userId: params.userId,
+        username: safeUser,
+        displayUsername: `@${safeUser}`,
+        giftId: 'follow',
+        giftName: 'Yeni Takipçi',
+        quantity: 1,
+        priority: 'normal',
+        category: 'general_blessings',
+        prayerId: 'tier-follower-greeting',
+        prayerTitle: 'Takipçi Selamlaması',
+        renderedPrayer: classified.renderedGreeting,
+        scholarId: chosenScholar,
+        status: 'pending',
+        attempts: 0,
+        createdAt: new Date().toISOString(),
+      };
+
+      setState((prev) => {
+        const next: AppState = {
+          ...prev,
+          queue: dedupeEventsById([...prev.queue, followEvent]),
+          lastUpdatedAt: new Date().toISOString(),
+        };
+        saveLocalState(next);
+        return next;
+      });
+
+      appendLog('info', 'queue', `[${params.source.toUpperCase()}] Takipçi selamlandı: @${safeUser}.`);
+      return { ok: true, event: followEvent };
+    },
+    [appendLog, pickNextScholar]
+  );
+
+  // Smart Queue Enqueue with Stage 2 Coin Tier Flows, Duplicate Protection & Priority Ordering
+  const enqueueGiftEvent = useCallback(
+    (params: {
+      source: EventSource;
+      username?: string;
+      userId?: string;
+      giftIdOrName?: string;
+      displayGiftName?: string;
+      quantity?: number;
+      unitCoins?: number;
+      repeatCount?: number;
+      giftType?: number;
+      repeatEnd?: boolean;
+      externalDedupeKey?: string;
+    }): EnqueueResult => {
+      setHasUserGesture(true);
+      const current = stateRef.current;
+      const rawUser =
+        params.username && params.username.trim()
+          ? params.username
+          : SAMPLE_TIKTOK_USERNAMES[Math.floor(Math.random() * SAMPLE_TIKTOK_USERNAMES.length)];
+      const safeUser = sanitizeUsername(rawUser);
+      const qty = Math.max(
+        1,
+        Math.min(999, Math.floor(Number(params.repeatCount ?? params.quantity ?? 1) || 1))
+      );
+
+      // Identify legacy gift rule metadata (if configured)
       const query = (params.giftIdOrName || 'Çay').trim().toLowerCase();
       const explicitMatch = current.gifts.find(
         (g) => g.id === params.giftIdOrName || g.tiktokGiftId.toLowerCase() === query || g.name.toLowerCase() === query
@@ -546,26 +804,59 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         }
       }
 
-      if (!matchedGift) {
-        appendLog('warning', 'queue', 'No gift rules configured.');
-        return { ok: false, reason: 'No gift rules configured.' };
-      }
-
-      if (!matchedGift.enabled) {
-        appendLog('warning', 'queue', `Gift "${matchedGift.name}" is currently disabled.`);
-        return { ok: false, reason: `Gift rule "${matchedGift.name}" is disabled.` };
+      if (explicitMatch && !explicitMatch.enabled && params.unitCoins === undefined) {
+        appendLog('warning', 'queue', `Gift "${explicitMatch.name}" is currently disabled.`);
+        return { ok: false, reason: `Gift rule "${explicitMatch.name}" is disabled.` };
       }
 
       const effectiveGiftName = params.displayGiftName
-        ? sanitizeGiftName(params.displayGiftName) || matchedGift.name
+        ? sanitizeGiftName(params.displayGiftName) || matchedGift?.name || 'Hediye'
         : explicitMatch
-        ? matchedGift.name
-        : sanitizeGiftName(params.giftIdOrName || matchedGift.name) || matchedGift.name;
+        ? explicitMatch.name
+        : sanitizeGiftName(params.giftIdOrName || matchedGift?.name || 'Hediye') || 'Hediye';
+
+      const effectiveUnitCoins =
+        params.unitCoins !== undefined
+          ? params.unitCoins
+          : params.source === 'simulation'
+          ? matchedGift?.minCoins ?? 1
+          : undefined;
+
+      const classification = classifyGiftInteraction(
+        {
+          username: safeUser,
+          userId: params.userId,
+          unitCoins: effectiveUnitCoins,
+          repeatCount: qty,
+          quantity: qty,
+          giftType: params.giftType,
+          repeatEnd: params.repeatEnd,
+        },
+        current.tierRules
+      );
+
+      if (!classification.shouldEnqueue || !classification.tier) {
+        const msg =
+          classification.reason === 'tier_disabled'
+            ? `Hediye seviyesi (${classification.tier}) yönetici panelinde devre dışı bırakıldığı için atlandı (@${safeUser}).`
+            : classification.reason === 'streak_incomplete'
+            ? `Eksik hediye serisi henüz tamamlanmadı (@${safeUser}).`
+            : `Geçersiz veya eşik dışı jeton değeri nedeniyle hediye atlandı (@${safeUser}, birim=${String(effectiveUnitCoins)}).`;
+        appendLog('warning', 'queue', msg);
+        return { ok: false, reason: msg };
+      }
+
+      // Stage 3 Yâsîn player is intentionally deferred until Stage 3
+      if (classification.tier === 'yasin_300') {
+        const msg = `[AŞAMA 2] @${safeUser} için ${classification.eventCoins} jetonluk Yâsîn eşiği algılandı; tam Yâsîn-i Şerîf oynatıcısı Aşama 3'te etkinleştirilecektir.`;
+        appendLog('info', 'queue', msg);
+        return { ok: false, reason: msg };
+      }
 
       // Duplicate protection window (real streams also pass unique streakKey so distinct combos are never dropped)
       const dedupeKey = params.externalDedupeKey
         ? `${params.source}:${params.externalDedupeKey}`
-        : `${params.source}:${safeUser.toLowerCase()}:${matchedGift.id}:${qty}`;
+        : `${params.source}:${safeUser.toLowerCase()}:${matchedGift?.id || effectiveGiftName.toLowerCase()}:${qty}:${classification.eventCoins}`;
       const nowMs = Date.now();
       const windowMs = params.externalDedupeKey
         ? 120_000
@@ -590,56 +881,95 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         }
       }
 
-      const selectedPrayer = pickRandomPrayer(matchedGift.category);
-      if (!selectedPrayer) {
-        appendLog('error', 'queue', 'No active prayer templates available in Prayer Library.');
-        return { ok: false, reason: 'No active prayer templates found. Activate at least one prayer.' };
+      const chosenScholar = pickNextScholar(current);
+      const tier = classification.tier;
+      let category: PrayerCategoryId = matchedGift?.category || 'general_blessings';
+      let prayerId = '';
+      let prayerTitle = '';
+      let renderedPrayer = '';
+      let arabicHarekeli: string | undefined;
+      let turkishMeaning: string | undefined;
+      let sourceCitation: string | undefined;
+      let arabicAudioUrl: string | undefined;
+      let arabicAudioLicense: string | undefined;
+      let arabicAudioAttribution: string | undefined;
+      let arabicAudioStatus: QueueEvent['arabicAudioStatus'];
+
+      if (tier === 'small_gift') {
+        // 1-49 coins: greeting ONLY, strictly no prayer
+        category = 'general_blessings';
+        prayerId = 'tier-small-greeting';
+        prayerTitle = 'Küçük Hediye Selamlaması';
+        renderedPrayer =
+          classification.renderedGreeting ||
+          renderPersonalizedPrayer(resolveTierRules(current.tierRules).smallGiftGreetingTemplate, safeUser);
+      } else if (tier === 'mid_gift') {
+        // 50-149 coins: random from Başlangıç Duaları pool, never consecutive repeat
+        const pickedMid = pickNonConsecutiveMidPrayer(current.prayers, lastMidPrayerIdRef.current);
+        if (!pickedMid) {
+          appendLog('error', 'queue', 'Başlangıç Duaları havuzunda aktif dua bulunamadı.');
+          return { ok: false, reason: 'Başlangıç Duaları havuzunda aktif dua bulunamadı.' };
+        }
+        lastMidPrayerIdRef.current = pickedMid.id;
+        category = pickedMid.category;
+        prayerId = pickedMid.id;
+        prayerTitle = pickedMid.title;
+        renderedPrayer = renderPersonalizedPrayer(pickedMid.template, safeUser);
+      } else {
+        // 150-299 coins (high_gift): verified Arabic harekeli dua + Qari audio + Turkish meaning & family/parents/relatives dua
+        const pickedHigh = pickNonConsecutiveHighDua(
+          current.highTierDuas || [],
+          lastHighDuaIdRef.current
+        );
+        if (!pickedHigh) {
+          appendLog('error', 'queue', 'Yüksek seviye (150-299 jeton) aktif dua bulunamadı.');
+          return { ok: false, reason: 'Yüksek seviye dua havuzunda aktif kayıt bulunamadı.' };
+        }
+        lastHighDuaIdRef.current = pickedHigh.id;
+        category = 'family_peace';
+        prayerId = pickedHigh.id;
+        prayerTitle = pickedHigh.title;
+        arabicHarekeli = pickedHigh.arabicHarekeli;
+        turkishMeaning = pickedHigh.turkishMeaning;
+        sourceCitation = pickedHigh.sourceCitation;
+        arabicAudioUrl = pickedHigh.audioUrl;
+        arabicAudioLicense = pickedHigh.audioLicense;
+        arabicAudioAttribution = pickedHigh.audioAttribution;
+        arabicAudioStatus = pickedHigh.audioStatus;
+        renderedPrayer = buildHighTierTurkishSpeech(pickedHigh, safeUser);
       }
 
-      const renderedPrayer = renderPersonalizedPrayer(selectedPrayer.template, safeUser);
-
-      // Determine scholar assignment
-      let chosenScholar: ScholarId = 'scholar_1';
-      if (current.scholars.activeMode === 'scholar_1') chosenScholar = 'scholar_1';
-      else if (current.scholars.activeMode === 'scholar_2') chosenScholar = 'scholar_2';
-      else {
-        const lastQueued = current.queue[current.queue.length - 1] || current.history[0];
-        const refSpeaker = lastQueued?.scholarId || current.scholars.currentSpeaker;
-        chosenScholar = refSpeaker === 'scholar_1' ? 'scholar_2' : 'scholar_1';
-      }
-
-      // Real finalized streaks should produce 1 prayer with accurate final quantity unless an explicit rule repeats
-      const repeatCount =
-        params.source === 'real'
-          ? explicitMatch?.repeatPerQuantity
-            ? Math.min(5, qty * matchedGift.quantityMultiplier)
-            : 1
-          : matchedGift.repeatPerQuantity
-          ? Math.min(5, qty * matchedGift.quantityMultiplier)
-          : 1;
-
-      const createdEvents: QueueEvent[] = [];
-      for (let i = 0; i < repeatCount; i++) {
-        createdEvents.push({
-          id: createUniqueId('evt'),
-          dedupeKey: `${dedupeKey}:${i}`,
-          source: params.source,
-          username: safeUser,
-          displayUsername: `@${safeUser}`,
-          giftId: matchedGift.id,
-          giftName: effectiveGiftName,
-          quantity: qty,
-          priority: matchedGift.priority,
-          category: selectedPrayer.category,
-          prayerId: selectedPrayer.id,
-          prayerTitle: selectedPrayer.title,
-          renderedPrayer,
-          scholarId: i % 2 === 0 ? chosenScholar : chosenScholar === 'scholar_1' ? 'scholar_2' : 'scholar_1',
-          status: 'pending',
-          attempts: 0,
-          createdAt: new Date().toISOString(),
-        });
-      }
+      const queuedEvent: QueueEvent = {
+        id: createUniqueId('evt'),
+        dedupeKey: `${dedupeKey}:0`,
+        source: params.source,
+        eventType: 'gift',
+        tier,
+        userId: params.userId,
+        username: safeUser,
+        displayUsername: `@${safeUser}`,
+        giftId: matchedGift?.id || effectiveGiftName.toLowerCase().replace(/\s+/g, '_'),
+        giftName: effectiveGiftName,
+        quantity: qty,
+        unitCoins: classification.unitCoins,
+        eventCoins: classification.eventCoins,
+        priority: classification.priority,
+        category,
+        prayerId,
+        prayerTitle,
+        renderedPrayer,
+        arabicHarekeli,
+        turkishMeaning,
+        sourceCitation,
+        arabicAudioUrl,
+        arabicAudioLicense,
+        arabicAudioAttribution,
+        arabicAudioStatus,
+        scholarId: chosenScholar,
+        status: 'pending',
+        attempts: 0,
+        createdAt: new Date().toISOString(),
+      };
 
       const priorityRank: Record<GiftRule['priority'], number> = {
         urgent: 3,
@@ -648,12 +978,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       };
 
       setState((prev) => {
-        const merged = dedupeEventsById([...prev.queue, ...createdEvents]).sort((a, b) => {
+        const merged = dedupeEventsById([...prev.queue, queuedEvent]).sort((a, b) => {
           if (a.status === 'speaking' && b.status !== 'speaking') return -1;
           if (b.status === 'speaking' && a.status !== 'speaking') return 1;
           return priorityRank[b.priority] - priorityRank[a.priority];
         });
-        return {
+        const next: AppState = {
           ...prev,
           queue: merged,
           stats: {
@@ -664,18 +994,20 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           },
           lastUpdatedAt: new Date().toISOString(),
         };
+        saveLocalState(next);
+        return next;
       });
 
-      const catLabel = PRAYER_CATEGORIES.find((c) => c.id === selectedPrayer.category)?.labelTr || selectedPrayer.category;
+      const catLabel = PRAYER_CATEGORIES.find((c) => c.id === category)?.labelTr || category;
       appendLog(
         'info',
         'queue',
-        `[${params.source.toUpperCase()}] Queued ${effectiveGiftName} x${qty} from @${safeUser} (${catLabel}).`
+        `[${params.source.toUpperCase()} · ${tier}] ${effectiveGiftName} x${qty} (${classification.eventCoins} jeton) @${safeUser} -> ${prayerTitle} (${catLabel}).`
       );
 
-      return { ok: true, event: createdEvents[0] };
+      return { ok: true, event: queuedEvent };
     },
-    [appendLog, pickRandomPrayer]
+    [appendLog, pickNextScholar]
   );
 
   const simulateSampleCayGift = useCallback(() => {
@@ -686,6 +1018,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       source: 'simulation',
       giftIdOrName: cayGift?.id || 'Çay',
       quantity: 1,
+      unitCoins: cayGift?.minCoins ?? 1,
     });
   }, [enqueueGiftEvent]);
 
@@ -693,7 +1026,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   useEffect(() => {
     if (isBroadcastView) return;
     if (!hasUserGesture) return;
-    if (state.queuePaused || activeEvent !== null) return;
+    if (state.queuePaused || activeEvent !== null || playbackHandleRef.current?.isLocked()) return;
 
     const nextPending = state.queue.find((q) => q.status === 'pending');
     if (!nextPending) return;
@@ -702,6 +1035,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     const startedEvent: QueueEvent = {
       ...nextPending,
       status: 'speaking',
+      playbackPhase:
+        nextPending.tier === 'high_gift' &&
+        nextPending.arabicAudioStatus === 'verified_ready' &&
+        nextPending.arabicAudioUrl
+          ? 'arabic_audio'
+          : 'turkish_speech',
       attempts: nextPending.attempts + 1,
       startedAt: new Date().toISOString(),
     };
@@ -754,18 +1093,34 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     }
 
     setLastSpeechError(null);
-    studioTTSRouter.speak(startedEvent.renderedPrayer, {
-      scholarId: startedEvent.scholarId,
-      preferredEngine: voiceCfg.provider,
-      voiceURI: chosenVoiceURI,
-      neuralProviderId: voiceCfg.neuralProviderId,
-      neuralVoiceId: chosenNeuralVoiceId,
-      tone: voiceCfg.narrationTone,
-      fallbackToBrowser: voiceCfg.fallbackToBrowser,
-      lang: voiceCfg.language || 'tr-TR',
-      rate: effectiveRate,
-      pitch: prosody.pitch,
-      volume: voiceCfg.volume,
+    const handle = executeStage2PlaybackSequence({
+      event: startedEvent,
+      arabicPlayer: verifiedArabicAudioPlayer,
+      turkishTts: studioTTSRouter,
+      ttsOptions: {
+        scholarId: startedEvent.scholarId,
+        preferredEngine: voiceCfg.provider,
+        voiceURI: chosenVoiceURI,
+        neuralProviderId: voiceCfg.neuralProviderId,
+        neuralVoiceId: chosenNeuralVoiceId,
+        tone: voiceCfg.narrationTone,
+        fallbackToBrowser: voiceCfg.fallbackToBrowser,
+        lang: voiceCfg.language || 'tr-TR',
+        rate: effectiveRate,
+        pitch: prosody.pitch,
+        volume: voiceCfg.volume,
+      },
+      onPhaseChange: (phase) => {
+        setActiveEvent((prev) =>
+          prev && prev.id === startedEvent.id ? { ...prev, playbackPhase: phase } : prev
+        );
+        pushLivePlayback({
+          activeEvent: { ...startedEvent, playbackPhase: phase },
+          speakingState: 'speaking',
+          activeScholar: startedEvent.scholarId,
+          mouthLevel: 0.25,
+        });
+      },
       onStart: () => {
         setSpeakingState('speaking');
       },
@@ -778,18 +1133,21 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         if (now - lastBroadcastSyncRef.current > 120) {
           lastBroadcastSyncRef.current = now;
           pushLivePlayback({
-            activeEvent: startedEvent,
+            activeEvent: activeEventRef.current || startedEvent,
             speakingState: 'speaking',
             activeScholar: startedEvent.scholarId,
             mouthLevel: level,
           });
         }
       },
-      onEnd: () => {
+      onComplete: () => {
+        if (playbackHandleRef.current === handle) {
+          playbackHandleRef.current = null;
+        }
         emitMouthLevel(0);
         setSpeakingState('holding');
         pushLivePlayback({
-          activeEvent: startedEvent,
+          activeEvent: activeEventRef.current || startedEvent,
           speakingState: 'holding',
           activeScholar: startedEvent.scholarId,
           mouthLevel: 0,
@@ -827,6 +1185,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         }, holdMs);
       },
       onError: (reason) => {
+        if (playbackHandleRef.current === handle) {
+          playbackHandleRef.current = null;
+        }
         emitMouthLevel(0);
         setLastSpeechError(reason);
         const failedEvent: QueueEvent = {
@@ -858,6 +1219,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         });
       },
     });
+    playbackHandleRef.current = handle;
   }, [state.queue, state.queuePaused, activeEvent, isBroadcastView, hasUserGesture, emitMouthLevel, appendLog]);
 
   const toggleQueuePause = useCallback(() => {
@@ -872,13 +1234,21 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   }, []);
 
   const pauseSpeech = useCallback(() => {
-    studioTTSRouter.pause();
+    playbackHandleRef.current?.pause();
+    if (!playbackHandleRef.current) {
+      verifiedArabicAudioPlayer.pause();
+      studioTTSRouter.pause();
+    }
     setIsSpeechPaused(true);
     emitMouthLevel(0);
   }, [emitMouthLevel]);
 
   const resumeSpeech = useCallback(() => {
-    studioTTSRouter.resume();
+    playbackHandleRef.current?.resume();
+    if (!playbackHandleRef.current) {
+      verifiedArabicAudioPlayer.resume();
+      studioTTSRouter.resume();
+    }
     setIsSpeechPaused(false);
   }, []);
 
@@ -887,6 +1257,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       window.clearTimeout(holdTimeoutRef.current);
       holdTimeoutRef.current = null;
     }
+    playbackHandleRef.current?.cancel();
+    playbackHandleRef.current = null;
+    verifiedArabicAudioPlayer.stop();
     studioTTSRouter.stop();
     emitMouthLevel(0);
     setIsSpeechPaused(false);
@@ -1013,7 +1386,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const testVoicePlayback = useCallback(
     (sampleText: string, scholarId: ScholarId = 'scholar_1') => {
       setHasUserGesture(true);
-      if (activeEventRef.current) return; // Don't clobber active queue playback
+      if (activeEventRef.current || playbackHandleRef.current?.isLocked() || verifiedArabicAudioPlayer.isPlaying()) {
+        return; // Don't clobber active queue or Arabic audio playback
+      }
       const voiceCfg = stateRef.current.voice;
       const chosenVoiceURI = resolveScholarVoiceURI(voiceCfg, scholarId);
       const chosenNeuralVoiceId =
@@ -1071,7 +1446,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const testSystemTurkishSpeech = useCallback(
     (scholarId: ScholarId = 'scholar_1') => {
       setHasUserGesture(true);
-      if (activeEventRef.current) return;
+      if (activeEventRef.current || playbackHandleRef.current?.isLocked() || verifiedArabicAudioPlayer.isPlaying()) {
+        return;
+      }
       const voiceCfg = stateRef.current.voice;
       const chosenVoiceURI = resolveScholarVoiceURI(voiceCfg, scholarId);
       const prosody = getScholarProsody(voiceCfg.rate, voiceCfg.pitch, scholarId, {
@@ -1115,10 +1492,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
 
   const testServerNeuralPlayback = useCallback(
     (sampleText: string, scholarId: ScholarId = 'scholar_1') => {
-      if (activeEventRef.current) {
+      if (activeEventRef.current || playbackHandleRef.current?.isLocked() || verifiedArabicAudioPlayer.isPlaying()) {
         return Promise.resolve({
           ok: false,
-          message: 'A queued prayer is currently speaking. Wait for it to finish or stop it first.',
+          message: 'A queued prayer or Arabic recitation is currently playing. Wait for it to finish or stop it first.',
         });
       }
 
@@ -1214,10 +1591,23 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         enqueueGiftEvent({
           source: 'real',
           username: gift.username,
+          userId: gift.userId,
           giftIdOrName: gift.giftName || gift.giftId,
           displayGiftName: gift.giftName,
           quantity: gift.quantity,
+          unitCoins: gift.unitCoins ?? gift.diamondCount,
+          repeatCount: gift.repeatCount ?? gift.quantity,
+          giftType: gift.giftType,
+          repeatEnd: gift.repeatEnd,
           externalDedupeKey: gift.streakKey,
+        });
+      },
+      onFollowEvent: (follow) => {
+        enqueueFollowEvent({
+          source: 'real',
+          username: follow.username || follow.nickname,
+          userId: follow.userId,
+          externalDedupeKey: follow.dedupeKey || follow.eventId,
         });
       },
       onLog: (level, message) => {
@@ -1232,7 +1622,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         tiktokConnectorRef.current = null;
       }
     };
-  }, [isBroadcastView, enqueueGiftEvent, appendLog]);
+  }, [isBroadcastView, enqueueGiftEvent, enqueueFollowEvent, appendLog]);
 
   useEffect(() => {
     if (isBroadcastView) return;
@@ -1289,10 +1679,23 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           enqueueGiftEvent({
             source: 'real',
             username: gift.username,
+            userId: gift.userId,
             giftIdOrName: gift.giftName || gift.giftId,
             displayGiftName: gift.giftName,
             quantity: gift.quantity,
+            unitCoins: gift.unitCoins ?? gift.diamondCount,
+            repeatCount: gift.repeatCount ?? gift.quantity,
+            giftType: gift.giftType,
+            repeatEnd: gift.repeatEnd,
             externalDedupeKey: gift.streakKey,
+          });
+        },
+        onFollowEvent: (follow) => {
+          enqueueFollowEvent({
+            source: 'real',
+            username: follow.username || follow.nickname,
+            userId: follow.userId,
+            externalDedupeKey: follow.dedupeKey || follow.eventId,
           });
         },
         onLog: (level, message) => appendLog(level, 'tiktok', message),
@@ -1308,7 +1711,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       appendLog('warning', 'tiktok', result.error);
     }
     return result;
-  }, [appendLog, enqueueGiftEvent]);
+  }, [appendLog, enqueueGiftEvent, enqueueFollowEvent]);
 
   const disconnectTikTok = useCallback(async () => {
     const connector = tiktokConnectorRef.current;
@@ -1398,11 +1801,17 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       deletePrayer,
       togglePrayerActive,
       pickRandomPrayer,
+      addHighTierDua,
+      updateHighTierDua,
+      deleteHighTierDua,
+      toggleHighTierDuaActive,
       addGift,
       updateGift,
       deleteGift,
       toggleGiftEnabled,
+      updateTierRules,
       enqueueGiftEvent,
+      enqueueFollowEvent,
       simulateSampleCayGift,
       toggleQueuePause,
       pauseSpeech,
@@ -1444,11 +1853,17 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       deletePrayer,
       togglePrayerActive,
       pickRandomPrayer,
+      addHighTierDua,
+      updateHighTierDua,
+      deleteHighTierDua,
+      toggleHighTierDuaActive,
       addGift,
       updateGift,
       deleteGift,
       toggleGiftEnabled,
+      updateTierRules,
       enqueueGiftEvent,
+      enqueueFollowEvent,
       simulateSampleCayGift,
       toggleQueuePause,
       pauseSpeech,

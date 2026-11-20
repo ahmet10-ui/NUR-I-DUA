@@ -69,6 +69,11 @@ function readJsonBody(req) {
   });
 }
 
+function toPositiveFiniteNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : 0;
+}
+
 function getOrCreateSession(username) {
   const handle = sanitizeHandle(username) || DEFAULT_USERNAME;
   let session = sessions.get(handle);
@@ -83,10 +88,28 @@ function getOrCreateSession(username) {
       clients: new Set(),
       pendingStreaks: new Map(),
       activeStreakKeys: new Map(),
+      seenFollowKeys: new Map(),
+      seenFollowMsgIds: new Map(),
     };
     sessions.set(handle, session);
   }
   return session;
+}
+
+function pruneTimestampMap(map, maxSize, maxAgeMs) {
+  if (map.size <= maxSize) return;
+  const cutoff = Date.now() - maxAgeMs;
+  for (const [key, ts] of map.entries()) {
+    if (ts < cutoff) {
+      map.delete(key);
+    }
+  }
+  // If still oversized, evict oldest entries
+  while (map.size > maxSize) {
+    const firstKey = map.keys().next().value;
+    if (firstKey === undefined) break;
+    map.delete(firstKey);
+  }
 }
 
 function broadcastSse(session, eventName, payload) {
@@ -116,18 +139,57 @@ function finalizeRelayGift(session, payload) {
 }
 
 function handleRawTikTokGift(session, data) {
-  const username = sanitizeDisplayText(data?.uniqueId || data?.nickname, 'tiktok_izleyici');
-  const nickname = sanitizeDisplayText(data?.nickname || data?.uniqueId, username);
+  const rawUserId = data?.userId ?? data?.user?.userId;
+  const userId =
+    rawUserId !== undefined && rawUserId !== null && String(rawUserId).trim()
+      ? sanitizeDisplayText(String(rawUserId), '')
+      : undefined;
+  const username = sanitizeDisplayText(
+    data?.uniqueId || data?.user?.uniqueId || data?.nickname || data?.user?.nickname,
+    'tiktok_izleyici'
+  );
+  const nickname = sanitizeDisplayText(
+    data?.nickname || data?.user?.nickname || data?.uniqueId || data?.user?.uniqueId,
+    username
+  );
   const giftId = String(data?.giftId ?? data?.gift?.gift_id ?? 'unknown');
-  const giftName = sanitizeDisplayText(data?.giftName || data?.extendedGiftInfo?.name, `Gift #${giftId}`);
-  const quantity = Math.max(1, Math.min(999, Number(data?.repeatCount) || 1));
+  const giftName = sanitizeDisplayText(
+    data?.giftName || data?.extendedGiftInfo?.name || data?.gift?.name,
+    `Gift #${giftId}`
+  );
+  const repeatCount = Math.max(1, Math.min(999, Math.floor(Number(data?.repeatCount) || 1)));
   const giftType = typeof data?.giftType === 'number' ? data.giftType : undefined;
   const repeatEnd = typeof data?.repeatEnd === 'boolean' ? data.repeatEnd : undefined;
   const isStreakable = giftType === 1;
 
+  // Prioritize extendedGiftInfo.diamond_count (unit catalog cost), then fall back safely
+  const extendedDiamondCount = toPositiveFiniteNumber(
+    data?.extendedGiftInfo?.diamond_count ?? data?.extendedGiftInfo?.diamondCount
+  );
+  const giftDiamondCount = toPositiveFiniteNumber(
+    data?.gift?.diamond_count ?? data?.gift?.diamondCount
+  );
+  const rawDiamondCount = toPositiveFiniteNumber(data?.diamondCount);
+
+  let unitCoins = 0;
+  let unitCoinsSource = 'none';
+  if (extendedDiamondCount > 0) {
+    unitCoins = extendedDiamondCount;
+    unitCoinsSource = 'extendedGiftInfo.diamond_count';
+  } else if (giftDiamondCount > 0) {
+    unitCoins = giftDiamondCount;
+    unitCoinsSource = 'gift.diamond_count';
+  } else if (rawDiamondCount > 0) {
+    unitCoins = rawDiamondCount;
+    unitCoinsSource = 'diamondCount';
+  }
+
   // Map ongoing streak bursts for (user + giftId) to a single deterministic streakKey
-  const comboBucket = `${username.toLowerCase()}:${giftId}`;
-  let streakKey = data?.groupId ? `${comboBucket}:${data.groupId}` : session.activeStreakKeys.get(comboBucket);
+  const userBucket = userId ? `uid_${userId}` : username.toLowerCase();
+  const comboBucket = `${userBucket}:${giftId}`;
+  let streakKey = data?.groupId
+    ? `${comboBucket}:${data.groupId}`
+    : session.activeStreakKeys.get(comboBucket);
   if (!streakKey) {
     streakKey = `${comboBucket}:${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     if (isStreakable && repeatEnd === false) {
@@ -138,15 +200,26 @@ function handleRawTikTokGift(session, data) {
   const payload = {
     eventId: String(data?.msgId || `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`),
     streakKey,
+    userId,
     username,
     nickname,
     giftId,
     giftName,
-    quantity,
-    diamondCount: typeof data?.diamondCount === 'number' ? data.diamondCount : undefined,
+    quantity: repeatCount,
+    unitCoins: unitCoins > 0 ? unitCoins : undefined,
+    unitCoinsSource,
+    diamondCount: unitCoins > 0 ? unitCoins : typeof data?.diamondCount === 'number' ? data.diamondCount : undefined,
     giftType,
-    repeatCount: quantity,
+    repeatCount,
     repeatEnd,
+    rawMeta: {
+      hasExtendedGiftInfo: Boolean(data?.extendedGiftInfo),
+      extendedDiamondCount: extendedDiamondCount || undefined,
+      giftDiamondCount: giftDiamondCount || undefined,
+      rawDiamondCount: typeof data?.diamondCount === 'number' ? data.diamondCount : undefined,
+      groupId: data?.groupId ? String(data.groupId) : undefined,
+      msgId: data?.msgId ? String(data.msgId) : undefined,
+    },
     timestamp: new Date().toISOString(),
   };
 
@@ -155,7 +228,23 @@ function handleRawTikTokGift(session, data) {
     if (existing) clearTimeout(existing.timer);
 
     const bestQty = existing ? Math.max(existing.payload.quantity, payload.quantity) : payload.quantity;
-    const updatedPayload = { ...payload, quantity: bestQty, repeatCount: bestQty };
+    const bestUnitCoins =
+      payload.unitCoins && payload.unitCoins > 0
+        ? payload.unitCoins
+        : existing?.payload?.unitCoins;
+    const bestUnitSource =
+      payload.unitCoins && payload.unitCoins > 0
+        ? payload.unitCoinsSource
+        : existing?.payload?.unitCoinsSource || 'none';
+
+    const updatedPayload = {
+      ...payload,
+      quantity: bestQty,
+      repeatCount: bestQty,
+      unitCoins: bestUnitCoins,
+      unitCoinsSource: bestUnitSource,
+      diamondCount: bestUnitCoins ?? payload.diamondCount,
+    };
 
     const timer = setTimeout(() => {
       const pending = session.pendingStreaks.get(streakKey);
@@ -176,16 +265,98 @@ function handleRawTikTokGift(session, data) {
     clearTimeout(existing.timer);
     session.pendingStreaks.delete(streakKey);
     const finalQty = Math.max(existing.payload.quantity, payload.quantity);
+    const finalUnitCoins =
+      payload.unitCoins && payload.unitCoins > 0
+        ? payload.unitCoins
+        : existing.payload.unitCoins;
+    const finalUnitSource =
+      payload.unitCoins && payload.unitCoins > 0
+        ? payload.unitCoinsSource
+        : existing.payload.unitCoinsSource || 'none';
     finalizeRelayGift(session, {
       ...payload,
       quantity: finalQty,
       repeatCount: finalQty,
+      unitCoins: finalUnitCoins,
+      unitCoinsSource: finalUnitSource,
+      diamondCount: finalUnitCoins ?? payload.diamondCount,
       repeatEnd: true,
     });
     return;
   }
 
   finalizeRelayGift(session, payload);
+}
+
+function isSocialFollowEvent(data) {
+  const displayType = String(
+    data?.displayType || data?.common?.displayText?.key || ''
+  ).toLowerCase();
+  const label = String(data?.label || '').toLowerCase();
+  const action = Number(data?.action);
+
+  if (displayType.includes('follow') || label.includes('follow')) {
+    return true;
+  }
+  // Do not classify explicit share/like/join displayTypes as follow
+  if (displayType) {
+    return false;
+  }
+  return action === 1;
+}
+
+function handleRawTikTokFollow(session, data, rawEventType) {
+  const rawUserId = data?.userId ?? data?.user?.userId;
+  const userId =
+    rawUserId !== undefined && rawUserId !== null && String(rawUserId).trim()
+      ? sanitizeDisplayText(String(rawUserId), '')
+      : undefined;
+  const username = sanitizeDisplayText(
+    data?.uniqueId || data?.user?.uniqueId || data?.nickname || data?.user?.nickname,
+    ''
+  );
+  if (!userId && !username) {
+    return;
+  }
+
+  const effectiveUsername = username || `kullanici_${userId}`;
+  const nickname = sanitizeDisplayText(
+    data?.nickname || data?.user?.nickname || data?.uniqueId || data?.user?.uniqueId,
+    effectiveUsername
+  );
+  const msgId = data?.msgId ?? data?.common?.msgId;
+  const cleanMsgId = msgId ? sanitizeDisplayText(String(msgId), '') : undefined;
+
+  const nowMs = Date.now();
+  if (cleanMsgId && session.seenFollowMsgIds.has(cleanMsgId)) {
+    return;
+  }
+
+  const dedupeKey = userId ? `uid:${userId}` : `uname:${effectiveUsername.toLowerCase()}`;
+  if (session.seenFollowKeys.has(dedupeKey)) {
+    return;
+  }
+
+  session.seenFollowKeys.set(dedupeKey, nowMs);
+  pruneTimestampMap(session.seenFollowKeys, 5000, 24 * 60 * 60 * 1000);
+  if (cleanMsgId) {
+    session.seenFollowMsgIds.set(cleanMsgId, nowMs);
+    pruneTimestampMap(session.seenFollowMsgIds, 5000, 60 * 60 * 1000);
+  }
+
+  const payload = {
+    eventId: cleanMsgId || `flw_${nowMs}_${Math.random().toString(36).slice(2, 7)}`,
+    dedupeKey,
+    userId,
+    username: effectiveUsername,
+    nickname,
+    rawEventType,
+    displayType: data?.displayType ? sanitizeDisplayText(String(data.displayType), '') : undefined,
+    msgId: cleanMsgId,
+    timestamp: new Date().toISOString(),
+  };
+
+  broadcastSse(session, 'follow', payload);
 }
 
 async function disconnectSession(session) {
@@ -195,6 +366,8 @@ async function disconnectSession(session) {
   }
   session.pendingStreaks.clear();
   session.activeStreakKeys.clear();
+  session.seenFollowKeys.clear();
+  session.seenFollowMsgIds.clear();
 
   if (session.connection) {
     try {
@@ -239,6 +412,16 @@ async function connectSession(username) {
 
   connection.on('gift', (data) => {
     handleRawTikTokGift(session, data);
+  });
+
+  connection.on('follow', (data) => {
+    handleRawTikTokFollow(session, data, 'follow');
+  });
+
+  connection.on('social', (data) => {
+    if (isSocialFollowEvent(data)) {
+      handleRawTikTokFollow(session, data, 'social');
+    }
   });
 
   connection.on('roomUser', (data) => {

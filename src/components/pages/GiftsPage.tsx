@@ -1,11 +1,30 @@
-import React, { useState } from 'react';
-import { Plus, Edit2, Trash2, Coffee, X, Check } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Plus, Edit2, Trash2, Coffee, X, Check, UserPlus, Sparkles, ShieldCheck } from 'lucide-react';
 import { PRAYER_CATEGORIES } from '../../data/defaults';
 import { useStudio } from '../../context/StudioContext';
-import { GiftPriority, GiftRule, PrayerCategoryId } from '../../types/nuridua';
+import { resolveTierRules } from '../../services/interactionClassifier';
+import { GiftPriority, GiftRule, PrayerCategoryId, TierRuleConfig } from '../../types/nuridua';
+import { renderPersonalizedPrayer } from '../../utils/sanitize';
 
 export const GiftsPage: React.FC = () => {
-  const { state, addGift, updateGift, deleteGift, toggleGiftEnabled, enqueueGiftEvent } = useStudio();
+  const {
+    state,
+    addGift,
+    updateGift,
+    deleteGift,
+    toggleGiftEnabled,
+    enqueueGiftEvent,
+    enqueueFollowEvent,
+    updateTierRules,
+  } = useStudio();
+
+  const effectiveTierRules = resolveTierRules(state.tierRules);
+  const [tierDraft, setTierDraft] = useState<TierRuleConfig>(effectiveTierRules);
+  const [simSampleUser, setSimSampleUser] = useState('Mehmet');
+
+  useEffect(() => {
+    setTierDraft(resolveTierRules(state.tierRules));
+  }, [state.tierRules]);
 
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -94,18 +113,103 @@ export const GiftsPage: React.FC = () => {
     );
   };
 
+  const handleSaveTierRules = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (
+      tierDraft.smallGiftMinCoins > tierDraft.smallGiftMaxCoins ||
+      tierDraft.midGiftMinCoins > tierDraft.midGiftMaxCoins ||
+      tierDraft.highGiftMinCoins > tierDraft.highGiftMaxCoins
+    ) {
+      setNotice('Hata: Alt jeton eşiği üst jeton eşiğinden büyük olamaz.');
+      return;
+    }
+    updateTierRules(tierDraft);
+    setNotice('Etkileşim seviyesi eşikleri ve selamlama metinleri kaydedildi.');
+  };
+
+  const handleTierToggle = (
+    key: 'followerEnabled' | 'smallGiftEnabled' | 'midGiftEnabled' | 'highGiftEnabled' | 'yasinEnabled'
+  ) => {
+    const nextVal = !(effectiveTierRules[key] ?? true);
+    updateTierRules({ [key]: nextVal });
+    setNotice('Seviye durumu güncellendi.');
+  };
+
+  const runStage2Sim = (mode: 'follow' | 'small' | 'mid' | 'high') => {
+    if (mode === 'follow') {
+      const res = enqueueFollowEvent({ source: 'simulation', username: simSampleUser });
+      setNotice(
+        res.ok && res.event
+          ? `Takipçi simülasyonu eklendi: ${res.event.renderedPrayer}`
+          : res.reason || 'Takipçi simülasyonu eklenemedi.'
+      );
+      return;
+    }
+
+    const presets = {
+      small: { giftIdOrName: 'Simülasyon Gülü', unitCoins: tierDraft.smallGiftMinCoins },
+      mid: { giftIdOrName: 'Simülasyon Buket', unitCoins: tierDraft.midGiftMinCoins },
+      high: { giftIdOrName: 'Simülasyon Tacı', unitCoins: tierDraft.highGiftMinCoins },
+    }[mode];
+
+    const res = enqueueGiftEvent({
+      source: 'simulation',
+      username: simSampleUser,
+      giftIdOrName: presets.giftIdOrName,
+      unitCoins: presets.unitCoins,
+      quantity: 1,
+    });
+    setNotice(
+      res.ok && res.event
+        ? `${presets.unitCoins} Jeton (${res.event.tier}) kuyruğa eklendi → ${res.event.prayerTitle}`
+        : res.reason || 'Simülasyon reddedildi.'
+    );
+  };
+
+  const tierToggleCards: Array<{
+    key: 'followerEnabled' | 'smallGiftEnabled' | 'midGiftEnabled' | 'highGiftEnabled' | 'yasinEnabled';
+    title: string;
+    subtitle: string;
+  }> = [
+    {
+      key: 'followerEnabled',
+      title: 'Yeni Takipçi',
+      subtitle: 'Otomatik selamlama',
+    },
+    {
+      key: 'smallGiftEnabled',
+      title: 'Küçük Hediye',
+      subtitle: `${effectiveTierRules.smallGiftMinCoins}–${effectiveTierRules.smallGiftMaxCoins} Jeton · Sadece selam`,
+    },
+    {
+      key: 'midGiftEnabled',
+      title: 'Orta Hediye',
+      subtitle: `${effectiveTierRules.midGiftMinCoins}–${effectiveTierRules.midGiftMaxCoins} Jeton · Başlangıç duası`,
+    },
+    {
+      key: 'highGiftEnabled',
+      title: 'Yüksek Hediye',
+      subtitle: `${effectiveTierRules.highGiftMinCoins}–${effectiveTierRules.highGiftMaxCoins} Jeton · Arapça + Aile`,
+    },
+    {
+      key: 'yasinEnabled',
+      title: 'Yâsîn-i Şerîf',
+      subtitle: `${effectiveTierRules.yasinMinCoins}+ Jeton · Aşama 3`,
+    },
+  ];
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 border-b border-[#1A2B54] pb-5">
         <div>
           <p className="text-xs text-[#D4B26A] font-medium tracking-[0.14em] uppercase">
-            Gift Rules
+            Gift Rules &amp; Tier Engine
           </p>
           <h1 className="mt-1 font-display text-3xl font-semibold text-white">
-            Gift Management
+            Gift &amp; Interaction Management
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            Map incoming gifts (starting with Çay) to prayer categories, priorities, and quantity rules.
+            Manage coin thresholds, per-tier enable switches, greeting templates, and custom TikTok gift overrides.
           </p>
         </div>
 
@@ -131,6 +235,252 @@ export const GiftsPage: React.FC = () => {
           </button>
         </div>
       )}
+
+      {/* Stage 2 Tier Controls & Coin Thresholds */}
+      <div className="bg-[#0B142B] border border-[#1E3361] p-5 sm:p-6 space-y-5">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 border-b border-[#16254A] pb-4">
+          <div>
+            <div className="flex items-center gap-2 text-xs text-[#D4B26A] uppercase tracking-[0.12em]">
+              <ShieldCheck className="w-4 h-4" />
+              <span>Aşama 2 · Etkileşim Seviyeleri ve Jeton Eşikleri</span>
+            </div>
+            <p className="mt-1 text-xs text-slate-400">
+              Küçük hediyeler dua okumaz (yalnızca selam); orta hediyeler Başlangıç Duaları havuzunu, yüksek hediyeler doğrulanmış Arapça kârî + Türkçe aile duasını kullanır.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              value={simSampleUser}
+              onChange={(e) => setSimSampleUser(e.target.value)}
+              aria-label="Test kullanıcı adı"
+              placeholder="Örnek isim"
+              className="w-28 bg-[#070E1F] border border-[#233969] px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#C9A45C]"
+            />
+            <button
+              type="button"
+              onClick={() => runStage2Sim('follow')}
+              className="inline-flex items-center gap-1.5 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] px-2.5 py-1.5 text-xs text-[#E5C88B] cursor-pointer"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Takipçi</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => runStage2Sim('small')}
+              className="bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] px-2.5 py-1.5 text-xs text-slate-200 cursor-pointer"
+            >
+              Küçük ({tierDraft.smallGiftMinCoins})
+            </button>
+            <button
+              type="button"
+              onClick={() => runStage2Sim('mid')}
+              className="bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] px-2.5 py-1.5 text-xs text-slate-200 cursor-pointer"
+            >
+              Orta ({tierDraft.midGiftMinCoins})
+            </button>
+            <button
+              type="button"
+              onClick={() => runStage2Sim('high')}
+              className="inline-flex items-center gap-1 bg-[#C9A45C] hover:bg-[#D7B46E] px-2.5 py-1.5 text-xs font-semibold text-[#070D1B] cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Yüksek ({tierDraft.highGiftMinCoins})</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 5 Tier Enable Switches */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          {tierToggleCards.map((item) => {
+            const isOn = effectiveTierRules[item.key] ?? true;
+            return (
+              <div
+                key={item.key}
+                className={`border p-3 flex items-center justify-between gap-2 ${
+                  isOn ? 'bg-[#070E1F] border-[#26407A]' : 'bg-[#070E1F]/50 border-[#162344] opacity-75'
+                }`}
+              >
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-white truncate">{item.title}</p>
+                  <p className="text-[11px] text-slate-400 truncate">{item.subtitle}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleTierToggle(item.key)}
+                  className={`text-[11px] font-medium px-2 py-1 border shrink-0 cursor-pointer ${
+                    isOn
+                      ? 'border-emerald-500/40 text-emerald-300 bg-emerald-950/30'
+                      : 'border-slate-600 text-slate-400 bg-slate-900/40'
+                  }`}
+                >
+                  {isOn ? 'Açık' : 'Kapalı'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Editable Thresholds & Greeting Templates */}
+        <form onSubmit={handleSaveTierRules} className="space-y-4">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Küçük Min</label>
+              <input
+                type="number"
+                min={1}
+                value={tierDraft.smallGiftMinCoins}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, smallGiftMinCoins: Math.max(1, Number(e.target.value) || 1) }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-2.5 py-1.5 text-xs font-mono-tabular text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Küçük Max</label>
+              <input
+                type="number"
+                min={1}
+                value={tierDraft.smallGiftMaxCoins}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, smallGiftMaxCoins: Math.max(1, Number(e.target.value) || 1) }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-2.5 py-1.5 text-xs font-mono-tabular text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Orta Min</label>
+              <input
+                type="number"
+                min={1}
+                value={tierDraft.midGiftMinCoins}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, midGiftMinCoins: Math.max(1, Number(e.target.value) || 1) }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-2.5 py-1.5 text-xs font-mono-tabular text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Orta Max</label>
+              <input
+                type="number"
+                min={1}
+                value={tierDraft.midGiftMaxCoins}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, midGiftMaxCoins: Math.max(1, Number(e.target.value) || 1) }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-2.5 py-1.5 text-xs font-mono-tabular text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Yüksek Min</label>
+              <input
+                type="number"
+                min={1}
+                value={tierDraft.highGiftMinCoins}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, highGiftMinCoins: Math.max(1, Number(e.target.value) || 1) }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-2.5 py-1.5 text-xs font-mono-tabular text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Yüksek Max</label>
+              <input
+                type="number"
+                min={1}
+                value={tierDraft.highGiftMaxCoins}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, highGiftMaxCoins: Math.max(1, Number(e.target.value) || 1) }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-2.5 py-1.5 text-xs font-mono-tabular text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Yâsîn Min</label>
+              <input
+                type="number"
+                min={1}
+                value={tierDraft.yasinMinCoins}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, yasinMinCoins: Math.max(1, Number(e.target.value) || 1) }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-2.5 py-1.5 text-xs font-mono-tabular text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-slate-400 mb-1">Hesap Modu</label>
+              <select
+                value={tierDraft.coinEvaluationMode}
+                onChange={(e) =>
+                  setTierDraft((d) => ({
+                    ...d,
+                    coinEvaluationMode: e.target.value as TierRuleConfig['coinEvaluationMode'],
+                  }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-2 py-1.5 text-xs text-white focus:outline-none focus:border-[#C9A45C]"
+              >
+                <option value="event_total">Tek Hediye Toplamı</option>
+                <option value="unit_only">Birim Jeton</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div>
+              <label htmlFor="tier-follow-tpl" className="block text-xs text-slate-300 mb-1">
+                Takipçi Selamlama Şablonu (<code className="text-[#E5C88B]">{'{isim}'}</code>)
+              </label>
+              <input
+                id="tier-follow-tpl"
+                type="text"
+                value={tierDraft.followerGreetingTemplate}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, followerGreetingTemplate: e.target.value }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-3 py-2 text-xs text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+              <p className="mt-1 text-[11px] text-slate-400">
+                Önizleme:{' '}
+                <span className="text-slate-200">
+                  {renderPersonalizedPrayer(tierDraft.followerGreetingTemplate, simSampleUser || 'Misafir')}
+                </span>
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="tier-small-tpl" className="block text-xs text-slate-300 mb-1">
+                Küçük Hediye (1–49) Selamlama Şablonu (<code className="text-[#E5C88B]">{'{isim}'}</code>)
+              </label>
+              <input
+                id="tier-small-tpl"
+                type="text"
+                value={tierDraft.smallGiftGreetingTemplate}
+                onChange={(e) =>
+                  setTierDraft((d) => ({ ...d, smallGiftGreetingTemplate: e.target.value }))
+                }
+                className="w-full bg-[#070E1F] border border-[#233969] px-3 py-2 text-xs text-white focus:outline-none focus:border-[#C9A45C]"
+              />
+              <p className="mt-1 text-[11px] text-slate-400">
+                Önizleme:{' '}
+                <span className="text-slate-200">
+                  {renderPersonalizedPrayer(tierDraft.smallGiftGreetingTemplate, simSampleUser || 'Misafir')}
+                </span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              className="px-4 py-2 bg-[#C9A45C] hover:bg-[#D7B46E] text-[#070D1B] font-semibold text-xs cursor-pointer"
+            >
+              Seviye Ayarlarını Kaydet
+            </button>
+          </div>
+        </form>
+      </div>
 
       {showForm && (
         <form

@@ -1,7 +1,16 @@
 import React from 'react';
-import { Pause, Play, Trash2, RotateCcw, SkipForward, Coffee } from 'lucide-react';
+import { Pause, Play, Trash2, RotateCcw, SkipForward, Coffee, UserPlus } from 'lucide-react';
 import { PRAYER_CATEGORIES } from '../../data/defaults';
 import { useStudio } from '../../context/StudioContext';
+import { InteractionTierId } from '../../types/nuridua';
+
+const TIER_LABELS: Record<InteractionTierId, string> = {
+  follower: 'Takipçi',
+  small_gift: 'Küçük Hediye',
+  mid_gift: 'Orta Hediye',
+  high_gift: 'Yüksek Hediye',
+  yasin_300: 'Yâsîn (300+)',
+};
 
 export const QueuePage: React.FC = () => {
   const {
@@ -15,6 +24,7 @@ export const QueuePage: React.FC = () => {
     retryQueueItem,
     clearQueue,
     simulateSampleCayGift,
+    enqueueFollowEvent,
   } = useStudio();
 
   const hasPendingAwaitingGesture =
@@ -31,11 +41,20 @@ export const QueuePage: React.FC = () => {
             Smart Event Queue
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            Unique event IDs, {state.tiktok.duplicateWindowSec}s duplicate protection, priority ordering, and persistent reload recovery.
+            Unique event IDs, {state.tiktok.duplicateWindowSec}s duplicate protection, priority ordering, and strict audio isolation lock.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => enqueueFollowEvent({ source: 'simulation' })}
+            className="inline-flex items-center gap-2 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-[#E5C88B] text-xs px-3.5 py-2.5 cursor-pointer"
+          >
+            <UserPlus className="w-3.5 h-3.5" />
+            <span>Test Takipçi</span>
+          </button>
+
           <button
             type="button"
             onClick={() => simulateSampleCayGift()}
@@ -117,7 +136,7 @@ export const QueuePage: React.FC = () => {
         <div className="bg-[#0B142B] border border-[#1B2D58] p-12 text-center">
           <p className="font-display text-2xl text-white">Queue is Empty</p>
           <p className="mt-1 text-sm text-slate-400">
-            Incoming gifts from simulated tests or configured TikTok connectors appear here in priority order.
+            Incoming followers and gifts from simulated tests or configured TikTok connectors appear here in priority order.
           </p>
           <button
             type="button"
@@ -132,6 +151,7 @@ export const QueuePage: React.FC = () => {
           {state.queue.map((item, index) => {
             const cat = PRAYER_CATEGORIES.find((c) => c.id === item.category)?.labelTr || item.category;
             const scholarName = state.scholars.profiles[item.scholarId].name;
+            const tierLabel = item.tier ? TIER_LABELS[item.tier] : null;
             return (
               <div
                 key={item.id}
@@ -145,17 +165,42 @@ export const QueuePage: React.FC = () => {
                     <span className={item.source === 'simulation' ? 'text-amber-300' : 'text-emerald-300'}>
                       {item.source === 'simulation' ? 'Simulation' : 'Real TikTok'}
                     </span>
+                    {tierLabel && (
+                      <>
+                        <span aria-hidden="true" className="text-slate-600">·</span>
+                        <span className="px-1.5 py-0.5 text-[10px] border border-[#C9A45C]/40 bg-[#C9A45C]/10 text-[#E5C88B]">
+                          {tierLabel}
+                        </span>
+                      </>
+                    )}
+                    {item.playbackPhase && item.status === 'speaking' && (
+                      <span className="px-1.5 py-0.5 text-[10px] border border-emerald-500/40 bg-emerald-950/30 text-emerald-300">
+                        {item.playbackPhase === 'arabic_audio' ? 'Arapça Tilavet' : 'Türkçe Seslendirme'}
+                      </span>
+                    )}
                     <span aria-hidden="true" className="text-slate-600">·</span>
                     <span className="capitalize text-slate-300">{item.priority} priority</span>
                   </div>
 
                   <p className="text-base font-semibold text-white">
-                    {item.displayUsername} — {item.giftName} × {item.quantity}
+                    {item.eventType === 'follow'
+                      ? `${item.displayUsername} — Yeni Takipçi`
+                      : `${item.displayUsername} — ${item.giftName} × ${item.quantity}${
+                          typeof item.eventCoins === 'number' && item.eventCoins > 0
+                            ? ` (${item.eventCoins} Jeton)`
+                            : ''
+                        }`}
                   </p>
 
                   <p className="text-xs text-slate-400">
                     {scholarName} · {cat} · {item.prayerTitle}
                   </p>
+
+                  {item.arabicHarekeli && (
+                    <p dir="rtl" lang="ar" className="text-xs text-[#E5C88B]/90 line-clamp-1 pt-0.5">
+                      {item.arabicHarekeli}
+                    </p>
+                  )}
 
                   <p className="text-xs text-slate-300 line-clamp-2 pt-0.5">
                     {item.renderedPrayer}

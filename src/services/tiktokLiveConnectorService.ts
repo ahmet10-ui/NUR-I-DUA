@@ -3,6 +3,7 @@ import {
   TikTokConnectionConfig,
   TikTokConnectionState,
   TikTokConnectorStatusPayload,
+  TikTokRelayFollowPayload,
   TikTokRelayGiftPayload,
 } from '../types/nuridua';
 import { sanitizeGiftName, sanitizeTikTokHandle, sanitizeUsername } from '../utils/sanitize';
@@ -10,6 +11,7 @@ import { sanitizeGiftName, sanitizeTikTokHandle, sanitizeUsername } from '../uti
 export interface TikTokConnectorCallbacks {
   onStatusChange?: (payload: TikTokConnectorStatusPayload) => void;
   onFinalizedGift?: (gift: TikTokRelayGiftPayload) => void;
+  onFollowEvent?: (follow: TikTokRelayFollowPayload) => void;
   onLog?: (level: 'info' | 'warning' | 'error', message: string) => void;
 }
 
@@ -92,6 +94,8 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
   // Streak aggregation & duplicate protection
   private pendingStreaks = new Map<string, PendingStreakEntry>();
   private finalizedStreakKeys = new Map<string, number>();
+  private seenFollowKeys = new Map<string, number>();
+  private seenFollowEventIds = new Map<string, number>();
 
   constructor(config: TikTokConnectionConfig, callbacks: TikTokConnectorCallbacks = {}) {
     this.config = { ...config };
@@ -184,10 +188,85 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     this.callbacks.onFinalizedGift?.(gift);
   }
 
+  private pruneFollowCaches(): void {
+    if (this.seenFollowKeys.size > 2000) {
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      for (const [k, ts] of this.seenFollowKeys.entries()) {
+        if (ts < cutoff) this.seenFollowKeys.delete(k);
+      }
+      while (this.seenFollowKeys.size > 2000) {
+        const firstKey = this.seenFollowKeys.keys().next().value;
+        if (firstKey === undefined) break;
+        this.seenFollowKeys.delete(firstKey);
+      }
+    }
+    if (this.seenFollowEventIds.size > 2000) {
+      const cutoff = Date.now() - 60 * 60 * 1000;
+      for (const [k, ts] of this.seenFollowEventIds.entries()) {
+        if (ts < cutoff) this.seenFollowEventIds.delete(k);
+      }
+    }
+  }
+
+  /**
+   * Normalizes and deduplicates incoming TikTok follow / social-follow events.
+   */
+  ingestRawFollowEvent(raw: Partial<TikTokRelayFollowPayload>): {
+    accepted: boolean;
+    follow?: TikTokRelayFollowPayload;
+  } {
+    const cleanUser = sanitizeUsername(raw.username || raw.nickname || 'tiktok_takipci');
+    const cleanUserId =
+      raw.userId !== undefined && raw.userId !== null && String(raw.userId).trim()
+        ? String(raw.userId).trim().slice(0, 64)
+        : undefined;
+    const cleanMsgId =
+      raw.msgId !== undefined && raw.msgId !== null && String(raw.msgId).trim()
+        ? String(raw.msgId).trim().slice(0, 80)
+        : undefined;
+    const eventId = String(
+      raw.eventId || cleanMsgId || `flw_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+    );
+    const dedupeKey =
+      (raw.dedupeKey && String(raw.dedupeKey).trim()) ||
+      (cleanUserId ? `uid:${cleanUserId}` : `uname:${cleanUser.toLowerCase()}`);
+
+    if (this.seenFollowEventIds.has(eventId) || (cleanMsgId && this.seenFollowEventIds.has(cleanMsgId))) {
+      return { accepted: false };
+    }
+    if (this.seenFollowKeys.has(dedupeKey)) {
+      return { accepted: false };
+    }
+
+    const nowMs = Date.now();
+    this.seenFollowKeys.set(dedupeKey, nowMs);
+    this.seenFollowEventIds.set(eventId, nowMs);
+    if (cleanMsgId) {
+      this.seenFollowEventIds.set(cleanMsgId, nowMs);
+    }
+    this.pruneFollowCaches();
+
+    const normalized: TikTokRelayFollowPayload = {
+      eventId,
+      dedupeKey,
+      userId: cleanUserId,
+      username: cleanUser,
+      nickname: raw.nickname ? String(raw.nickname).slice(0, 60) : undefined,
+      rawEventType: raw.rawEventType,
+      displayType: raw.displayType ? String(raw.displayType).slice(0, 80) : undefined,
+      msgId: cleanMsgId,
+      timestamp: raw.timestamp || new Date().toISOString(),
+    };
+
+    this.callbacks.onFollowEvent?.(normalized);
+    return { accepted: true, follow: normalized };
+  }
+
   /**
    * Normalizes incoming gift payloads from the Node.js relay server and guarantees
    * that rapid TikTok gift streaks (`giftType === 1 && !repeatEnd`) only emit a single
-   * finalized prayer event once the streak completes with the accurate final quantity.
+   * finalized prayer event once the streak completes with the accurate final quantity
+   * and unit coin value.
    */
   ingestRawGiftEvent(raw: Partial<TikTokRelayGiftPayload>): {
     accepted: boolean;
@@ -195,6 +274,10 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     finalized?: TikTokRelayGiftPayload;
   } {
     const cleanUser = sanitizeUsername(raw.username || raw.nickname || 'tiktok_izleyici');
+    const cleanUserId =
+      raw.userId !== undefined && raw.userId !== null && String(raw.userId).trim()
+        ? String(raw.userId).trim().slice(0, 64)
+        : undefined;
     const cleanGiftName = sanitizeGiftName(raw.giftName || 'Hediye');
     const cleanGiftId = String(raw.giftId || cleanGiftName.toLowerCase()).slice(0, 64);
     const qty = Math.max(
@@ -203,24 +286,37 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     );
     const streakKey =
       (raw.streakKey && String(raw.streakKey).trim()) ||
-      `${cleanUser.toLowerCase()}:${cleanGiftId}:${raw.eventId || Date.now()}`;
+      `${cleanUserId ? `uid_${cleanUserId}` : cleanUser.toLowerCase()}:${cleanGiftId}:${raw.eventId || Date.now()}`;
 
     if (this.finalizedStreakKeys.has(streakKey)) {
       return { accepted: false, buffered: false };
     }
 
+    const rawUnit = Number(raw.unitCoins);
+    const rawDiamond = Number(raw.diamondCount);
+    const resolvedUnitCoins =
+      Number.isFinite(rawUnit) && rawUnit > 0
+        ? rawUnit
+        : Number.isFinite(rawDiamond) && rawDiamond > 0
+        ? rawDiamond
+        : undefined;
+
     const normalized: TikTokRelayGiftPayload = {
       eventId: String(raw.eventId || `tk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`),
       streakKey,
+      userId: cleanUserId,
       username: cleanUser,
       nickname: raw.nickname ? String(raw.nickname).slice(0, 60) : undefined,
       giftId: cleanGiftId,
       giftName: cleanGiftName,
       quantity: qty,
-      diamondCount: typeof raw.diamondCount === 'number' ? raw.diamondCount : undefined,
+      unitCoins: resolvedUnitCoins,
+      unitCoinsSource: raw.unitCoinsSource,
+      diamondCount: resolvedUnitCoins ?? (typeof raw.diamondCount === 'number' ? raw.diamondCount : undefined),
       giftType: typeof raw.giftType === 'number' ? raw.giftType : undefined,
       repeatCount: qty,
       repeatEnd: raw.repeatEnd,
+      rawMeta: raw.rawMeta,
       timestamp: raw.timestamp || new Date().toISOString(),
     };
 
@@ -232,9 +328,14 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
       if (existing) {
         globalThis.clearTimeout(existing.flushTimer);
       }
+      const bestUnitCoins = normalized.unitCoins ?? existing?.gift.unitCoins;
       const nextGift: TikTokRelayGiftPayload = existing
         ? {
             ...normalized,
+            userId: normalized.userId || existing.gift.userId,
+            unitCoins: bestUnitCoins,
+            unitCoinsSource: normalized.unitCoins ? normalized.unitCoinsSource : existing.gift.unitCoinsSource,
+            diamondCount: bestUnitCoins ?? normalized.diamondCount,
             quantity: Math.max(existing.gift.quantity, normalized.quantity),
             repeatCount: Math.max(existing.gift.quantity, normalized.quantity),
           }
@@ -257,8 +358,13 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
       globalThis.clearTimeout(existing.flushTimer);
       this.pendingStreaks.delete(streakKey);
       const finalQty = Math.max(existing.gift.quantity, normalized.quantity);
-      const finalized = {
+      const bestUnitCoins = normalized.unitCoins ?? existing.gift.unitCoins;
+      const finalized: TikTokRelayGiftPayload = {
         ...normalized,
+        userId: normalized.userId || existing.gift.userId,
+        unitCoins: bestUnitCoins,
+        unitCoinsSource: normalized.unitCoins ? normalized.unitCoinsSource : existing.gift.unitCoinsSource,
+        diamondCount: bestUnitCoins ?? normalized.diamondCount,
         quantity: finalQty,
         repeatCount: finalQty,
         repeatEnd: true,
@@ -303,6 +409,15 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         this.ingestRawGiftEvent(rawGift);
       } catch {
         this.callbacks.onLog?.('warning', 'Relay sunucusundan geçersiz hediye verisi alındı.');
+      }
+    });
+
+    es.addEventListener('follow', (ev) => {
+      try {
+        const rawFollow = JSON.parse((ev as MessageEvent).data) as Partial<TikTokRelayFollowPayload>;
+        this.ingestRawFollowEvent(rawFollow);
+      } catch {
+        this.callbacks.onLog?.('warning', 'Relay sunucusundan geçersiz takipçi verisi alındı.');
       }
     });
 

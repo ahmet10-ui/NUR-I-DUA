@@ -1,4 +1,5 @@
 export type PrayerCategoryId =
+  | 'mid_opening'
   | 'health_healing'
   | 'blessings_abundance'
   | 'family_peace'
@@ -40,6 +41,51 @@ export interface GiftRule {
   updatedAt: string;
 }
 
+export type InteractionTierId =
+  | 'follower'
+  | 'small_gift'
+  | 'mid_gift'
+  | 'high_gift'
+  | 'yasin_300';
+
+export type IncomingEventType = 'gift' | 'follow';
+
+export interface TierRuleConfig {
+  smallGiftMinCoins: number;
+  smallGiftMaxCoins: number;
+  midGiftMinCoins: number;
+  midGiftMaxCoins: number;
+  highGiftMinCoins: number;
+  highGiftMaxCoins: number;
+  yasinMinCoins: number;
+  coinEvaluationMode: 'event_total' | 'unit_only';
+  followerEnabled: boolean;
+  smallGiftEnabled?: boolean;
+  midGiftEnabled?: boolean;
+  highGiftEnabled?: boolean;
+  yasinEnabled?: boolean;
+  followerGreetingTemplate: string;
+  smallGiftGreetingTemplate: string;
+}
+
+export type VerifiedAudioStatus = 'verified_ready' | 'pending_license_verification';
+
+export interface HighTierDuaEntry {
+  id: string;
+  title: string;
+  sourceCitation: string;
+  arabicHarekeli: string;
+  turkishMeaning: string;
+  personalPrayerTemplate: string;
+  audioUrl: string;
+  audioLicense: string;
+  audioAttribution: string;
+  audioSha256?: string;
+  audioStatus: VerifiedAudioStatus;
+  isActive: boolean;
+  updatedAt: string;
+}
+
 export type EventSource = 'simulation' | 'real';
 export type QueueEventStatus = 'pending' | 'speaking' | 'completed' | 'failed' | 'cancelled';
 
@@ -47,16 +93,29 @@ export interface QueueEvent {
   id: string;
   dedupeKey: string;
   source: EventSource;
+  eventType?: IncomingEventType;
+  tier?: InteractionTierId;
+  userId?: string;
   username: string;
   displayUsername: string;
   giftId: string;
   giftName: string;
   quantity: number;
+  unitCoins?: number;
+  eventCoins?: number;
   priority: GiftPriority;
   category: PrayerCategoryId;
   prayerId: string;
   prayerTitle: string;
   renderedPrayer: string;
+  arabicHarekeli?: string;
+  turkishMeaning?: string;
+  sourceCitation?: string;
+  arabicAudioUrl?: string;
+  arabicAudioLicense?: string;
+  arabicAudioAttribution?: string;
+  arabicAudioStatus?: VerifiedAudioStatus;
+  playbackPhase?: 'arabic_audio' | 'turkish_speech';
   scholarId: 'scholar_1' | 'scholar_2';
   status: QueueEventStatus;
   attempts: number;
@@ -141,15 +200,31 @@ export interface TikTokConnectionConfig {
 export interface TikTokRelayGiftPayload {
   eventId: string;
   streakKey: string;
+  userId?: string;
   username: string;
   nickname?: string;
   giftId: string;
   giftName: string;
   quantity: number;
+  unitCoins?: number;
+  unitCoinsSource?: 'extendedGiftInfo.diamond_count' | 'gift.diamond_count' | 'diamondCount' | 'none';
   diamondCount?: number;
   giftType?: number;
   repeatCount?: number;
   repeatEnd?: boolean;
+  rawMeta?: Record<string, unknown>;
+  timestamp: string;
+}
+
+export interface TikTokRelayFollowPayload {
+  eventId: string;
+  dedupeKey: string;
+  userId?: string;
+  username: string;
+  nickname?: string;
+  rawEventType?: 'follow' | 'social' | 'simulation';
+  displayType?: string;
+  msgId?: string;
   timestamp: string;
 }
 
@@ -202,6 +277,8 @@ export interface StudioStats {
 export interface AppState {
   prayers: PrayerTemplate[];
   gifts: GiftRule[];
+  tierRules?: TierRuleConfig;
+  highTierDuas?: HighTierDuaEntry[];
   queue: QueueEvent[];
   history: QueueEvent[];
   queuePaused: boolean;

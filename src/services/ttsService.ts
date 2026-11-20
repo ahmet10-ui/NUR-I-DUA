@@ -277,28 +277,77 @@ export function getScholarProsody(
   };
 }
 
+const ARABIC_SCRIPT_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF۝]+/g;
+
+export function containsArabicScript(text: string): boolean {
+  ARABIC_SCRIPT_RE.lastIndex = 0;
+  return ARABIC_SCRIPT_RE.test(text);
+}
+
+export function stripArabicScriptForTurkishTts(text: string): string {
+  return text
+    .replace(ARABIC_SCRIPT_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([.,;!?])/g, '$1')
+    .trim();
+}
+
 /**
- * Splits exceptionally long texts (> 900 chars) at sentence boundaries so Android TTS stays responsive,
- * while keeping normal Turkish prayers in a single uninterrupted SpeechSynthesisUtterance.
+ * Splits long Turkish texts at sentence (or clause/word) boundaries so Android TTS and Web Speech
+ * stay responsive on long High-Tier prayers while keeping normal prayers uninterrupted.
  */
-function splitLongTextIfNeeded(rawText: string): string[] {
+export function splitLongTextIfNeeded(
+  rawText: string,
+  threshold = 900,
+  maxChunk = 750
+): string[] {
   const normalized = rawText
     .replace(/\s+/g, ' ')
     .replace(/\s+([.,;!?])/g, '$1')
     .trim();
 
   if (!normalized) return [];
-  if (normalized.length <= 900) return [normalized];
+  if (normalized.length <= threshold) return [normalized];
 
-  const sentences = normalized
+  const rawSentences = normalized
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
 
+  // If any single sentence still exceeds maxChunk, further split on commas/semicolons or word spaces.
+  const atomicPieces: string[] = [];
+  for (const sentence of rawSentences) {
+    if (sentence.length <= maxChunk) {
+      atomicPieces.push(sentence);
+      continue;
+    }
+    const clauses = sentence
+      .split(/(?<=[,;:])\s+/)
+      .map((c) => c.trim())
+      .filter(Boolean);
+    for (const clause of clauses) {
+      if (clause.length <= maxChunk) {
+        atomicPieces.push(clause);
+        continue;
+      }
+      const words = clause.split(/\s+/);
+      let piece = '';
+      for (const word of words) {
+        if (piece && piece.length + word.length + 1 > maxChunk) {
+          atomicPieces.push(piece);
+          piece = word;
+        } else {
+          piece = piece ? `${piece} ${word}` : word;
+        }
+      }
+      if (piece) atomicPieces.push(piece);
+    }
+  }
+
   const groups: string[] = [];
   let current = '';
-  for (const s of sentences) {
-    if (current && current.length + s.length + 1 > 750) {
+  for (const s of atomicPieces) {
+    if (current && current.length + s.length + 1 > maxChunk) {
       groups.push(current);
       current = s;
     } else {
@@ -425,25 +474,28 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
       }
     };
 
-    // Generous safety timeout so slow Android TTS voices never get cut off prematurely,
-    // while preventing queue deadlock if an engine never fires onend.
-    const maxDurationMs = Math.max(
-      25000,
-      Math.min(90000, (text.length / Math.max(0.55, options.rate)) * 260)
-    );
-    this.safetyTimeout = window.setTimeout(() => {
-      if (!finished && this.playbackToken === token) {
-        try {
-          synth.cancel();
-        } catch {
-          // ignore
-        }
-        finish(
-          true,
-          'Sistem TTS motoru zaman aşımına uğradı (onend olayı alınamadı).'
-        );
+    const armSegmentTimeout = (segmentText: string) => {
+      if (this.safetyTimeout !== null) {
+        window.clearTimeout(this.safetyTimeout);
       }
-    }, maxDurationMs);
+      const maxDurationMs = Math.max(
+        25000,
+        Math.min(90000, (segmentText.length / Math.max(0.55, options.rate)) * 260)
+      );
+      this.safetyTimeout = window.setTimeout(() => {
+        if (!finished && this.playbackToken === token) {
+          try {
+            synth.cancel();
+          } catch {
+            // ignore
+          }
+          finish(
+            true,
+            'Sistem TTS motoru zaman aşımına uğradı (onend olayı alınamadı).'
+          );
+        }
+      }, maxDurationMs);
+    };
 
     const speakSegmentAt = (index: number) => {
       if (finished || this.playbackToken !== token) return;
@@ -452,6 +504,7 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
         return;
       }
 
+      armSegmentTimeout(segments[index]);
       const utterance = new SpeechSynthesisUtterance(segments[index]);
       // Keep reference on instance so Chrome/Android GC cannot drop the utterance and lose `onend`
       this.activeUtterance = utterance;
@@ -883,15 +936,13 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
       return;
     }
 
-    const cleanText = text.replace(/\s+/g, ' ').trim();
-    if (!cleanText) {
+    const segments = splitLongTextIfNeeded(text, 750, 600);
+    if (segments.length === 0) {
       options.onEnd?.();
       return;
     }
 
-    const utteranceId = `nuri_${Date.now()}_${++this.utteranceCounter}`;
-    this.activeUtteranceId = utteranceId;
-
+    let currentSegmentIndex = 0;
     let finished = false;
     let startedNotified = false;
     const startTime = performance.now();
@@ -936,16 +987,49 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
       }
     };
 
-    const maxDurationMs = Math.max(
-      30000,
-      Math.min(110000, (cleanText.length / Math.max(0.55, options.rate)) * 280)
-    );
-    this.safetyTimeout = window.setTimeout(() => {
-      if (!finished && this.playbackToken === token) {
-        void stopNativeAndroid();
-        finish(true, 'Android yerel TTS zaman aşımına uğradı (onDone olayı alınamadı).');
+    const armSegmentTimeout = (segmentText: string) => {
+      if (this.safetyTimeout !== null) {
+        window.clearTimeout(this.safetyTimeout);
       }
-    }, maxDurationMs);
+      const maxDurationMs = Math.max(
+        30000,
+        Math.min(110000, (segmentText.length / Math.max(0.55, options.rate)) * 280)
+      );
+      this.safetyTimeout = window.setTimeout(() => {
+        if (!finished && this.playbackToken === token) {
+          void stopNativeAndroid();
+          finish(true, 'Android yerel TTS zaman aşımına uğradı (onDone olayı alınamadı).');
+        }
+      }, maxDurationMs);
+    };
+
+    const speakSegmentAt = async (index: number) => {
+      if (finished || this.playbackToken !== token) return;
+      if (index >= segments.length) {
+        finish(false);
+        return;
+      }
+      currentSegmentIndex = index;
+      const segmentText = segments[index];
+      const utteranceId = `nuri_${Date.now()}_${++this.utteranceCounter}`;
+      this.activeUtteranceId = utteranceId;
+      armSegmentTimeout(segmentText);
+
+      const res = await speakNativeAndroid({
+        text: segmentText,
+        lang: options.lang || 'tr-TR',
+        rate: options.rate,
+        pitch: options.pitch,
+        volume: options.volume,
+        voiceName: options.voiceURI || undefined,
+        utteranceId,
+      });
+
+      if (finished || this.playbackToken !== token) return;
+      if (!res.ok) {
+        finish(true, res.error || 'Android TextToSpeech başlatılamadı.');
+      }
+    };
 
     const run = async () => {
       try {
@@ -963,8 +1047,13 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
           },
           onDone: (ev) => {
             if (finished || this.playbackToken !== token) return;
-            // Guard: only complete when the currently active utterance finishes
+            // Guard: only advance when the currently active utterance finishes
             if (ev.utteranceId !== this.activeUtteranceId) return;
+            const nextIndex = currentSegmentIndex + 1;
+            if (nextIndex < segments.length) {
+              void speakSegmentAt(nextIndex);
+              return;
+            }
             finish(false);
           },
           onError: (ev) => {
@@ -980,20 +1069,7 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
         }
         this.unsubListeners = unsub;
 
-        const res = await speakNativeAndroid({
-          text: cleanText,
-          lang: options.lang || 'tr-TR',
-          rate: options.rate,
-          pitch: options.pitch,
-          volume: options.volume,
-          voiceName: options.voiceURI || undefined,
-          utteranceId,
-        });
-
-        if (finished || this.playbackToken !== token) return;
-        if (!res.ok) {
-          finish(true, res.error || 'Android TextToSpeech başlatılamadı.');
-        }
+        await speakSegmentAt(0);
       } catch (err) {
         finish(
           true,
@@ -1106,21 +1182,22 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
       }
     };
 
-    const armSafetyTimeout = () => {
+    const armSafetyTimeout = (timeoutMs = 75000) => {
       this.clearSafetyTimeout();
-      const maxDurationMs = Math.max(
-        45000,
-        Math.min(180000, (cleanText.length / Math.max(0.65, options.rate || 0.94)) * 380)
-      );
       this.safetyTimeout = window.setTimeout(() => {
         if (!finished && this.playbackToken === token && !this.isPaused) {
           void stopSeslenQueue();
           finish(true, 'Seslen-TTS Hasan oynatma zaman aşımına uğradı.');
         }
-      }, maxDurationMs);
+      }, timeoutMs);
     };
 
-    armSafetyTimeout();
+    const initialMaxMs = Math.max(
+      60000,
+      Math.min(180000, (cleanText.length / Math.max(0.65, options.rate || 0.94)) * 380)
+    );
+    armSafetyTimeout(initialMaxMs);
+    let lastWatchdogRefreshAt = performance.now();
 
     const run = async () => {
       try {
@@ -1128,6 +1205,7 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
           onStart: (ev) => {
             if (finished || this.playbackToken !== token) return;
             if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            armSafetyTimeout(75000);
             if (!startedNotified) {
               startedNotified = true;
               options.onStart?.();
@@ -1136,6 +1214,11 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
           onMouth: (ev) => {
             if (finished || this.playbackToken !== token || this.isPaused) return;
             if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            const now = performance.now();
+            if (now - lastWatchdogRefreshAt > 2000) {
+              lastWatchdogRefreshAt = now;
+              armSafetyTimeout(75000);
+            }
             options.onMouthLevel?.(ev.level);
           },
           onDone: (ev) => {
@@ -1248,6 +1331,17 @@ export class StudioTTSRouter implements ITTSProvider {
   speak(text: string, options: TTSSpeakOptions): void {
     this.stop();
 
+    // Hard safety guard: Arabic script must NEVER be synthesized with Turkish TTS engines.
+    const safeTurkishText = containsArabicScript(text)
+      ? stripArabicScriptForTurkishTts(text)
+      : text;
+    if (!safeTurkishText.trim()) {
+      options.onError?.(
+        'Arapça metin Türkçe TTS motorlarına (Seslen-TTS / Antalia-2 Mini) gönderilemez.'
+      );
+      return;
+    }
+
     // Strict per-scholar isolation on Android:
     // Hacı Ahmet Efendi (scholar_1) uses ONLY Seslen-TTS Hasan; never fallback to Antalia-2 Mini.
     if (
@@ -1262,20 +1356,20 @@ export class StudioTTSRouter implements ITTSProvider {
         );
         return;
       }
-      this.seslenLocalProvider.speak(text, options);
+      this.seslenLocalProvider.speak(safeTurkishText, options);
       return;
     }
 
     if (options.preferredEngine === 'external_studio_adapter' && !options.forceStandardSystemTts) {
       this.activeEngine = 'neural';
-      this.neuralProvider.speak(text, {
+      this.neuralProvider.speak(safeTurkishText, {
         ...options,
         onError: (reason) => {
           if (options.fallbackToBrowser !== false) {
             options.onFallbackNotice?.(
               `Sunucu TTS kullanılamıyor (${reason}). Cihaz sistem TTS motoruna geçiliyor.`
             );
-            this.speakWithLocalOrNative(text, options);
+            this.speakWithLocalOrNative(safeTurkishText, options);
             return;
           }
           options.onError?.(reason);
@@ -1284,7 +1378,7 @@ export class StudioTTSRouter implements ITTSProvider {
       return;
     }
 
-    this.speakWithLocalOrNative(text, options);
+    this.speakWithLocalOrNative(safeTurkishText, options);
   }
 
   pause(): void {
@@ -1319,6 +1413,224 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 }
 
+export interface AudioClipPlayOptions {
+  volume: number;
+  onStart?: () => void;
+  onMouthLevel?: (level: number) => void;
+  onEnd?: () => void;
+  onError?: (reason: string) => void;
+}
+
+/**
+ * Plays verified, reuse-licensed human/Qari Arabic audio clips (e.g. CC0 MP3 bundled under `/audio/duas/`).
+ * Enforces an active-playback flag and token isolation so no incoming event can cut off ongoing recitation.
+ */
+export class VerifiedAudioClipPlayer {
+  private audioEl: HTMLAudioElement | null = null;
+  private audioCtx: AudioContext | null = null;
+  private sourceNode: MediaElementAudioSourceNode | null = null;
+  private analyser: AnalyserNode | null = null;
+  private rafId: number | null = null;
+  private fallbackTimer: number | null = null;
+  private isPaused = false;
+  private isPlayingInternal = false;
+  private playbackToken = 0;
+
+  isSupported(): boolean {
+    return typeof window !== 'undefined' && typeof Audio !== 'undefined';
+  }
+
+  isPlaying(): boolean {
+    return this.isPlayingInternal;
+  }
+
+  private ensureAudioContext(): AudioContext | null {
+    if (typeof window === 'undefined') return null;
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) return null;
+    if (!this.audioCtx || this.audioCtx.state === 'closed') {
+      this.audioCtx = new Ctx();
+    }
+    if (this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {
+        // ignore
+      });
+    }
+    return this.audioCtx;
+  }
+
+  private cleanupAudio(resetMouth?: (level: number) => void) {
+    if (this.rafId !== null) {
+      window.cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    if (this.fallbackTimer !== null) {
+      window.clearInterval(this.fallbackTimer);
+      this.fallbackTimer = null;
+    }
+    if (this.sourceNode) {
+      try {
+        this.sourceNode.disconnect();
+      } catch {
+        // ignore
+      }
+      this.sourceNode = null;
+    }
+    if (this.analyser) {
+      try {
+        this.analyser.disconnect();
+      } catch {
+        // ignore
+      }
+      this.analyser = null;
+    }
+    if (this.audioEl) {
+      try {
+        this.audioEl.pause();
+        this.audioEl.removeAttribute('src');
+        this.audioEl.load();
+      } catch {
+        // ignore
+      }
+      this.audioEl = null;
+    }
+    this.isPaused = false;
+    this.isPlayingInternal = false;
+    resetMouth?.(0);
+  }
+
+  play(url: string, options: AudioClipPlayOptions): void {
+    this.stop();
+    const token = ++this.playbackToken;
+
+    if (!this.isSupported()) {
+      options.onError?.('Tarayıcı doğrulanmış ses dosyası oynatmayı desteklemiyor.');
+      return;
+    }
+
+    const cleanUrl = url.trim();
+    if (!cleanUrl) {
+      options.onError?.('Arapça ses dosyası adresi boş.');
+      return;
+    }
+
+    const audio = new Audio(cleanUrl);
+    audio.preload = 'auto';
+    audio.volume = Math.min(1, Math.max(0, options.volume));
+    this.audioEl = audio;
+    this.isPlayingInternal = true;
+    this.isPaused = false;
+
+    let finished = false;
+    const finish = (isErr = false, msg?: string) => {
+      if (finished || this.playbackToken !== token) return;
+      finished = true;
+      this.cleanupAudio(options.onMouthLevel);
+      if (isErr) {
+        options.onError?.(msg || 'Doğrulanmış Arapça ses dosyası oynatılamadı.');
+      } else {
+        options.onEnd?.();
+      }
+    };
+
+    let analyserReady = false;
+    try {
+      const ctx = this.ensureAudioContext();
+      if (ctx) {
+        const source = ctx.createMediaElementSource(audio);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.65;
+        source.connect(analyser);
+        analyser.connect(ctx.destination);
+        this.sourceNode = source;
+        this.analyser = analyser;
+        analyserReady = true;
+      }
+    } catch {
+      analyserReady = false;
+    }
+
+    const dataBuffer =
+      analyserReady && this.analyser ? new Uint8Array(this.analyser.fftSize) : null;
+    let smoothedLevel = 0;
+
+    const tickAnalyser = () => {
+      if (finished || this.playbackToken !== token) return;
+      if (this.isPaused || audio.paused) {
+        options.onMouthLevel?.(0);
+      } else if (this.analyser && dataBuffer) {
+        this.analyser.getByteTimeDomainData(dataBuffer);
+        let sumSquares = 0;
+        for (let i = 0; i < dataBuffer.length; i++) {
+          const normalized = (dataBuffer[i] - 128) / 128;
+          sumSquares += normalized * normalized;
+        }
+        const rms = Math.sqrt(sumSquares / dataBuffer.length);
+        const rawLevel = Math.min(1, Math.max(0, (rms - 0.012) * 5.2));
+        smoothedLevel = smoothedLevel * 0.45 + rawLevel * 0.55;
+        options.onMouthLevel?.(smoothedLevel);
+      }
+      this.rafId = window.requestAnimationFrame(tickAnalyser);
+    };
+
+    audio.onplay = () => {
+      if (finished || this.playbackToken !== token) return;
+      options.onStart?.();
+      if (analyserReady) {
+        if (this.rafId === null) {
+          this.rafId = window.requestAnimationFrame(tickAnalyser);
+        }
+      } else if (this.fallbackTimer === null) {
+        const startTs = performance.now();
+        this.fallbackTimer = window.setInterval(() => {
+          if (finished || this.playbackToken !== token || this.isPaused || audio.paused) {
+            options.onMouthLevel?.(0);
+            return;
+          }
+          const t = (performance.now() - startTs) / 1000;
+          const level = Math.max(0.08, Math.min(0.85, 0.3 + 0.36 * Math.abs(Math.sin(t * 6.8))));
+          options.onMouthLevel?.(level);
+        }, 45);
+      }
+    };
+
+    audio.onended = () => finish(false);
+    audio.onerror = () => finish(true, `Ses dosyası yüklenemedi veya çözülemedi (${cleanUrl}).`);
+
+    void audio.play().catch((err) => {
+      finish(
+        true,
+        err instanceof Error ? `Arapça ses oynatma başlatılamadı: ${err.message}` : 'Arapça ses başlatılamadı.'
+      );
+    });
+  }
+
+  pause(): void {
+    this.isPaused = true;
+    if (this.audioEl && !this.audioEl.paused) {
+      this.audioEl.pause();
+    }
+  }
+
+  resume(): void {
+    this.isPaused = false;
+    if (this.audioEl && this.audioEl.paused) {
+      this.audioEl.play().catch(() => {
+        // ignore
+      });
+    }
+  }
+
+  stop(): void {
+    this.playbackToken++;
+    this.cleanupAudio();
+  }
+}
+
+export const verifiedArabicAudioPlayer = new VerifiedAudioClipPlayer();
 export const browserTTSProvider = new BrowserSpeechSynthesisProvider();
 export const nativeAndroidTTSProvider = new NativeAndroidTTSProvider();
 export const serverNeuralTTSProvider = new ServerNeuralTTSProvider();

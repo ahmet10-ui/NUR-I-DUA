@@ -298,8 +298,14 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
               <h2 className="text-base font-semibold text-white">Live Queue &amp; Playback</h2>
               <p className="text-xs text-slate-400 mt-0.5">
                 {activeEvent
-                  ? `Now speaking for ${activeEvent.displayUsername} (${activeEvent.giftName})`
-                  : 'Waiting for incoming gift event'}
+                  ? activeEvent.eventType === 'follow'
+                    ? `Now greeting follower ${activeEvent.displayUsername}`
+                    : `Now speaking for ${activeEvent.displayUsername} (${activeEvent.giftName}${
+                        typeof activeEvent.eventCoins === 'number' && activeEvent.eventCoins > 0
+                          ? ` · ${activeEvent.eventCoins} Jeton`
+                          : ''
+                      })`
+                  : 'Waiting for incoming gift or follower event'}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -329,9 +335,17 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
               <div className="flex items-center justify-between text-xs text-[#E5C88B]">
                 <span>
                   {activeScholar.name} · {activeEvent.source === 'simulation' ? 'Simulation' : 'Live'}
+                  {activeEvent.playbackPhase
+                    ? ` · ${activeEvent.playbackPhase === 'arabic_audio' ? 'Arapça Tilavet' : 'Türkçe Dua'}`
+                    : ''}
                 </span>
                 <span className="font-mono-tabular">{activeEvent.id}</span>
               </div>
+              {activeEvent.arabicHarekeli && (
+                <p dir="rtl" lang="ar" className="mt-2 text-right text-sm text-[#F7E7C4] leading-relaxed">
+                  {activeEvent.arabicHarekeli}
+                </p>
+              )}
               <p className="mt-2 font-display text-lg text-white leading-snug">
                 {activeEvent.renderedPrayer}
               </p>
@@ -340,7 +354,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
 
           <div className="mt-4">
             <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
-              <span>Recent Gift &amp; Prayer Events</span>
+              <span>Recent Gift &amp; Interaction Events</span>
               <button
                 type="button"
                 onClick={() => onNavigate('history')}
@@ -352,7 +366,7 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
 
             {recentEvents.length === 0 ? (
               <div className="py-8 text-center border border-dashed border-[#1E3361] text-xs text-slate-400">
-                No gift events processed yet. Click &ldquo;Simulate Çay Gift&rdquo; to test the full prayer &amp; 3D scholar pipeline.
+                No interaction events processed yet. Click &ldquo;Simulate Çay Gift&rdquo; to test the full prayer &amp; 3D scholar pipeline.
               </div>
             ) : (
               <div className="divide-y divide-[#16254A]">
@@ -362,7 +376,13 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
                     <div key={ev.id} className="py-2.5 flex items-center justify-between gap-3 text-xs">
                       <div className="min-w-0">
                         <p className="text-slate-100 font-medium truncate">
-                          {ev.displayUsername} · {ev.giftName} × {ev.quantity}
+                          {ev.eventType === 'follow'
+                            ? `${ev.displayUsername} · Yeni Takipçi`
+                            : `${ev.displayUsername} · ${ev.giftName} × ${ev.quantity}${
+                                typeof ev.eventCoins === 'number' && ev.eventCoins > 0
+                                  ? ` (${ev.eventCoins} Jeton)`
+                                  : ''
+                              }`}
                         </p>
                         <p className="text-slate-400 truncate">
                           {cat} · {ev.source === 'simulation' ? 'Simulation' : 'Real'}

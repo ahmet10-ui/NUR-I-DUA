@@ -85,19 +85,45 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                 >
                   <div className="min-w-0 text-left">
                     <p className="text-[9px] tracking-[0.16em] uppercase text-[#D4B26A] leading-tight">
-                      Dua Niyeti
+                      {activeEvent.eventType === 'follow'
+                        ? 'Yeni Takipçi'
+                        : activeEvent.tier === 'high_gift'
+                        ? 'Yüksek Seviye Dua Niyeti'
+                        : 'Dua Niyeti'}
                     </p>
                     <p className="font-display text-base sm:text-lg font-semibold text-white truncate leading-tight">
                       {activeEvent.displayUsername}
                     </p>
                   </div>
                   <div className="text-right shrink-0">
-                    <p className="text-[11px] font-semibold text-[#E5C88B] leading-tight">
-                      {activeEvent.giftName} × {activeEvent.quantity}
-                    </p>
-                    <p className="text-[10px] text-slate-300 leading-tight">
-                      {categoryMeta?.labelTr || activeEvent.category}
-                    </p>
+                    {activeEvent.eventType === 'follow' ? (
+                      <>
+                        <p className="text-[11px] font-semibold text-[#E5C88B] leading-tight">
+                          Takip Etti
+                        </p>
+                        <p className="text-[10px] text-slate-300 leading-tight">
+                          NUR-I DUA Ailesi
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-[11px] font-semibold text-[#E5C88B] leading-tight">
+                          {activeEvent.giftName} × {activeEvent.quantity}
+                          {typeof activeEvent.eventCoins === 'number' && activeEvent.eventCoins > 0
+                            ? ` · ${activeEvent.eventCoins} Jeton`
+                            : ''}
+                        </p>
+                        <p className="text-[10px] text-slate-300 leading-tight">
+                          {activeEvent.tier === 'small_gift'
+                            ? 'Kısa Selamlama'
+                            : activeEvent.tier === 'mid_gift'
+                            ? 'Başlangıç Duası'
+                            : activeEvent.tier === 'high_gift'
+                            ? 'Arapça Dua & Aile Duası'
+                            : categoryMeta?.labelTr || activeEvent.category}
+                        </p>
+                      </>
+                    )}
                   </div>
                 </motion.div>
               )}
@@ -138,17 +164,47 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 8 }}
                 transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-                className="w-full bg-[#060C1D]/78 border border-[#C9A45C]/45 px-3.5 py-2.5 text-center"
+                className="w-full bg-[#060C1D]/82 border border-[#C9A45C]/45 px-3.5 py-2.5 text-center"
               >
                 <div className="flex items-center justify-center gap-1.5 text-[10px] text-[#E5C88B] tracking-[0.12em] uppercase">
                   <span className="truncate">{activeScholarProfile.name}</span>
                   <span aria-hidden="true">·</span>
                   <span className="truncate">{activeEvent.prayerTitle}</span>
+                  {activeEvent.tier === 'high_gift' && activeEvent.playbackPhase && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="shrink-0 text-[#F7E7C4]">
+                        {activeEvent.playbackPhase === 'arabic_audio'
+                          ? 'Arapça Tilavet'
+                          : 'Türkçe Meal & Dua'}
+                      </span>
+                    </>
+                  )}
                 </div>
                 {broadcast.goldAnimationsEnabled && (
                   <div className="my-1.5 mx-auto h-px w-20 gold-shimmer-line" />
                 )}
-                <p className="font-display text-[15px] sm:text-[17px] leading-[1.32] text-[#F8FAFC] font-medium line-clamp-4">
+                {activeEvent.arabicHarekeli && (
+                  <div className="mb-1.5 border border-[#C9A45C]/25 bg-[#040917]/70 px-2.5 py-1.5 text-right">
+                    <p
+                      dir="rtl"
+                      lang="ar"
+                      className="max-h-16 overflow-y-auto text-[14px] sm:text-[15px] leading-[1.65] text-[#F7E7C4] font-serif"
+                    >
+                      {activeEvent.arabicHarekeli}
+                    </p>
+                    {activeEvent.sourceCitation && (
+                      <p className="mt-0.5 text-[9px] text-[#D4B26A]/85 text-left truncate">
+                        Kaynak: {activeEvent.sourceCitation}
+                      </p>
+                    )}
+                  </div>
+                )}
+                <p
+                  className={`font-display text-[15px] sm:text-[17px] leading-[1.32] text-[#F8FAFC] font-medium ${
+                    activeEvent.arabicHarekeli ? 'line-clamp-3' : 'line-clamp-4'
+                  }`}
+                >
                   {activeEvent.renderedPrayer}
                 </p>
               </motion.div>

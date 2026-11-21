@@ -8,6 +8,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(NurIDuaTtsPlugin.class);
         registerPlugin(SeslenLocalTtsPlugin.class);
+        registerPlugin(NurIDuaAudioPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

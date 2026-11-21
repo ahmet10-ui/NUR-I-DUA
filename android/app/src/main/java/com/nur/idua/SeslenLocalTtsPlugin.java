@@ -36,6 +36,7 @@ import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.nio.LongBuffer;
 import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -48,10 +49,14 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -93,6 +98,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
     private static final int GECIS = 120;
     private static final int MAX_ALIGNMENT_FRAMES = 2400;
     private static final int STATIC_MAX_BYTES = SAMPLE_RATE * 2 * 25; // up to 25s static AudioTrack
+    private static final long MIN_WARMUP_AVAIL_RAM_BYTES = 850L * 1024L * 1024L; // safe headroom on 6 GB RAM device
 
     // Verified reference values of stiller.npz -> hasan/notr.npy
     private static final float[] EXPECTED_HASAN_REF_HEAD = new float[] {
@@ -156,6 +162,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
 
     private final AtomicBoolean isDownloading = new AtomicBoolean(false);
     private final AtomicBoolean cancelDownloadRequested = new AtomicBoolean(false);
+    private final AtomicBoolean warmUpScheduled = new AtomicBoolean(false);
     private final AtomicLong activePlaybackToken = new AtomicLong(0);
     private final AtomicBoolean isPlaybackPaused = new AtomicBoolean(false);
     private volatile String activeUtteranceId = null;
@@ -166,12 +173,57 @@ public class SeslenLocalTtsPlugin extends Plugin {
     private OrtSession sesSession = null;
     private float[] hasanStyleVector = null; // 256 floats from stiller.npz -> hasan/notr.npy
     private String styleHeaderText = "";
+    private OnnxTensor cachedStil256Tensor = null;
+    private OnnxTensor cachedRef128Tensor = null;
+    private OnnxTensor cachedS128Tensor = null;
+    private OnnxTensor cachedPerdeTensor = null;
+    private OnnxTensor cachedTonlamaTensor = null;
 
     private AudioTrack activeAudioTrack = null;
     private final Object audioLock = new Object();
 
     private final List<String> recentLogs = new ArrayList<>();
     private final Object logLock = new Object();
+
+    @Override
+    public void load() {
+        super.load();
+        if (allFilesPresentWithExpectedSize(getModelDir())) {
+            scheduleBackgroundWarmUp("startup");
+        }
+    }
+
+    private void scheduleBackgroundWarmUp(String reason) {
+        if (!warmUpScheduled.compareAndSet(false, true)) {
+            return;
+        }
+        synthesisExecutor.execute(() -> {
+            try {
+                File dir = getModelDir();
+                if (!allFilesPresentWithExpectedSize(dir)) {
+                    return;
+                }
+                ActivityManager am = (ActivityManager) getContext().getSystemService(Context.ACTIVITY_SERVICE);
+                if (am != null) {
+                    ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                    am.getMemoryInfo(mi);
+                    if (mi.lowMemory || mi.availMem < MIN_WARMUP_AVAIL_RAM_BYTES) {
+                        addLog("Arka plan ön yükleme ertelendi (" + reason + "): RAM eşiği altında (boş="
+                            + Math.round(mi.availMem / (1024.0 * 1024.0)) + " MB).");
+                        return;
+                    }
+                }
+                long t0 = System.currentTimeMillis();
+                ensurePythonStarted();
+                File sembollerFile = new File(dir, "semboller.json");
+                Python.getInstance().getModule("seslen_g2p").callAttr("warm_up", sembollerFile.getAbsolutePath());
+                ensureSessionsLoaded();
+                addLog("Hasan motoru arka planda ön yüklendi (" + reason + "): " + (System.currentTimeMillis() - t0) + " ms.");
+            } catch (Exception e) {
+                addLog("Arka plan ön yükleme atlandı (" + reason + "): " + e.getMessage());
+            }
+        });
+    }
 
     private void addLog(String message) {
         String ts = new SimpleDateFormat("HH:mm:ss.SSS", Locale.ROOT).format(new Date());
@@ -440,6 +492,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
 
                 addLog("Seslen-TTS Hasan tüm model dosyaları Wi-Fi ile indirildi ve SHA-256 doğrulandı.");
                 emitDownloadProgress("ready", "Tamamlandı", TOTAL_MODEL_BYTES, TOTAL_MODEL_BYTES);
+                scheduleBackgroundWarmUp("post_download");
                 JSObject okRes = new JSObject();
                 okRes.put("ok", true);
                 okRes.put("percent", 100);
@@ -576,6 +629,14 @@ public class SeslenLocalTtsPlugin extends Plugin {
         notifyListeners("seslenDownloadProgress", ev);
     }
 
+    private static FloatBuffer allocateDirectFloatBuffer(float[] data, int offset, int length) {
+        ByteBuffer bb = ByteBuffer.allocateDirect(length * 4).order(ByteOrder.nativeOrder());
+        FloatBuffer fb = bb.asFloatBuffer();
+        fb.put(data, offset, length);
+        fb.rewind();
+        return fb;
+    }
+
     private void ensureSessionsLoaded() throws Exception {
         File dir = getModelDir();
         if (!allFilesPresentWithExpectedSize(dir)) {
@@ -594,6 +655,33 @@ public class SeslenLocalTtsPlugin extends Plugin {
                     + ", ref[0..3]=" + formatHead(hasanStyleVector, 0, 4)
                     + ", s[128..131]=" + formatHead(hasanStyleVector, 128, 4)
                     + ", L2=" + String.format(Locale.ROOT, "%.4f", computeL2(hasanStyleVector)));
+            }
+            if (cachedStil256Tensor == null) {
+                cachedStil256Tensor = OnnxTensor.createTensor(
+                    ortEnv,
+                    allocateDirectFloatBuffer(hasanStyleVector, 0, 256),
+                    new long[] { 1L, 256L }
+                );
+            }
+            if (cachedRef128Tensor == null) {
+                cachedRef128Tensor = OnnxTensor.createTensor(
+                    ortEnv,
+                    allocateDirectFloatBuffer(hasanStyleVector, 0, 128),
+                    new long[] { 1L, 128L }
+                );
+            }
+            if (cachedS128Tensor == null) {
+                cachedS128Tensor = OnnxTensor.createTensor(
+                    ortEnv,
+                    allocateDirectFloatBuffer(hasanStyleVector, 128, 128),
+                    new long[] { 1L, 128L }
+                );
+            }
+            if (cachedPerdeTensor == null) {
+                cachedPerdeTensor = OnnxTensor.createTensor(ortEnv, new float[] { 1.0f });
+            }
+            if (cachedTonlamaTensor == null) {
+                cachedTonlamaTensor = OnnxTensor.createTensor(ortEnv, new float[] { 1.0f });
             }
             if (metinSession == null || sesSession == null) {
                 OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
@@ -1096,6 +1184,118 @@ public class SeslenLocalTtsPlugin extends Plugin {
         synthesisExecutor.execute(() -> executeSynthesisAndPlayback(null, true, utteranceId, text, rate, volume, token, false, "ONNX Hasan Kuyruk"));
     }
 
+    private static final class StreamBlock {
+        static final StreamBlock END = new StreamBlock(null, true);
+        final short[] pcm16;
+        final boolean isEnd;
+
+        StreamBlock(short[] pcm16, boolean isEnd) {
+            this.pcm16 = pcm16;
+            this.isEnd = isEnd;
+        }
+    }
+
+    private static final class RunningPcmAccumulator {
+        int sampleCount = 0;
+        float min = Float.MAX_VALUE;
+        float max = -Float.MAX_VALUE;
+        float peak = 0f;
+        double sum = 0.0;
+        double sumSq = 0.0;
+        int bad = 0;
+
+        void addFloats(float[] arr) {
+            for (float v : arr) {
+                sampleCount++;
+                if (Float.isNaN(v) || Float.isInfinite(v)) {
+                    bad++;
+                    continue;
+                }
+                if (v < min) min = v;
+                if (v > max) max = v;
+                float av = Math.abs(v);
+                if (av > peak) peak = av;
+                sum += v;
+                sumSq += (double) v * v;
+            }
+        }
+
+        void addGapSamples(int gapSamples) {
+            if (gapSamples <= 0) return;
+            sampleCount += gapSamples;
+            if (0f < min) min = 0f;
+            if (0f > max) max = 0f;
+        }
+
+        void addShorts(short[] arr) {
+            for (short s : arr) {
+                sampleCount++;
+                float v = s / 32768.0f;
+                if (v < min) min = v;
+                if (v > max) max = v;
+                float av = Math.abs(v);
+                if (av > peak) peak = av;
+                sum += v;
+                sumSq += (double) v * v;
+            }
+        }
+
+        PcmStats toStats() {
+            if (sampleCount == 0) {
+                return new PcmStats(0, 0L, 0f, 0f, 0f, 0f, 0f, 0);
+            }
+            int valid = Math.max(1, sampleCount - bad);
+            long durMs = (sampleCount * 1000L) / SAMPLE_RATE;
+            return new PcmStats(
+                sampleCount,
+                durMs,
+                min == Float.MAX_VALUE ? 0f : min,
+                max == -Float.MAX_VALUE ? 0f : max,
+                peak,
+                (float) Math.sqrt(sumSq / valid),
+                (float) (sum / valid),
+                bad
+            );
+        }
+    }
+
+    private static short[] convertStreamingChunkToPcm16(
+        float[] wave,
+        boolean isFirst,
+        boolean isLast,
+        int silenceMsAfter,
+        float dcOffset,
+        float utteranceScale
+    ) {
+        int extraTailSamples = isLast
+            ? (SAMPLE_RATE * 150) / 1000
+            : (SAMPLE_RATE * Math.max(0, silenceMsAfter)) / 1000;
+        short[] pcm16 = new short[wave.length + extraTailSamples];
+        int fadeInSamples = isFirst ? Math.min(wave.length, (SAMPLE_RATE * 10) / 1000) : Math.min(wave.length, (SAMPLE_RATE * 4) / 1000);
+        int fadeOutSamples = isLast ? Math.min(wave.length, (SAMPLE_RATE * 25) / 1000) : Math.min(wave.length, (SAMPLE_RATE * 8) / 1000);
+
+        for (int i = 0; i < wave.length; i++) {
+            float v = (Float.isNaN(wave[i]) || Float.isInfinite(wave[i])) ? 0.0f : ((wave[i] - dcOffset) * utteranceScale);
+            if (i < fadeInSamples && fadeInSamples > 1) {
+                v *= (i / (float) (fadeInSamples - 1));
+            }
+            if (i >= wave.length - fadeOutSamples && fadeOutSamples > 1) {
+                int k = i - (wave.length - fadeOutSamples);
+                v *= (1.0f - (k / (float) (fadeOutSamples - 1)));
+            }
+            // Transparent soft-knee limiter above 0.94 prevents rare inter-chunk peak clipping without altering normal speech
+            float av = Math.abs(v);
+            if (av > 0.94f) {
+                float excess = av - 0.94f;
+                float limited = 0.94f + 0.059f * (excess / (excess + 0.10f));
+                v = v >= 0.0f ? limited : -limited;
+            }
+            v = Math.max(-1.0f, Math.min(1.0f, v));
+            pcm16[i] = (short) Math.round(v * 32767.0f);
+        }
+        return pcm16;
+    }
+
     private void executeSynthesisAndPlayback(
         PluginCall resolveCall,
         boolean queueMode,
@@ -1108,84 +1308,211 @@ public class SeslenLocalTtsPlugin extends Plugin {
         String logLabel
     ) {
         long startWallMs = System.currentTimeMillis();
+        long modelLoadMs = 0L;
+        long g2pMs = 0L;
         long synthElapsedMs = 0L;
+        long timeToFirstAudioMs = 0L;
+        Thread playerThread = null;
+        BlockingQueue<StreamBlock> streamQueue = null;
 
         try {
             if (activePlaybackToken.get() != token) {
                 return;
             }
             addLog(logLabel + " başlatıldı (utteranceId=" + utteranceId + ", rate=" + rate + ") -> ENGINE=SeslenLocalTts (ONNX Runtime). Android TextToSpeech / Antalia-2 Mini ÇAĞRILMADI.");
+
+            long loadStartMs = System.currentTimeMillis();
             ensurePythonStarted();
             ensureSessionsLoaded();
+            modelLoadMs = System.currentTimeMillis() - loadStartMs;
 
             File dir = getModelDir();
             File sembollerFile = new File(dir, "semboller.json");
+            long g2pStartMs = System.currentTimeMillis();
             Python py = Python.getInstance();
             PyObject g2pMod = py.getModule("seslen_g2p");
             String preparedJson = g2pMod.callAttr("prepare_chunks", text, sembollerFile.getAbsolutePath()).toString();
             JSONObject prep = new JSONObject(preparedJson);
             JSONArray chunks = prep.getJSONArray("chunks");
-            if (chunks.length() == 0) {
+            g2pMs = System.currentTimeMillis() - g2pStartMs;
+
+            int chunkCount = chunks.length();
+            if (chunkCount == 0) {
                 throw new RuntimeException("Seslendirilecek Türkçe metin parçası oluşturulamadı.");
             }
-            addLog("Python G2P hazır: " + chunks.length() + " parça, ilk okunuş=\"" + chunks.getJSONObject(0).getString("okunus") + "\"");
+            addLog("Python G2P hazır (" + g2pMs + " ms, modelLoad=" + modelLoadMs + " ms): " + chunkCount
+                + " parça, ilk okunuş=\"" + chunks.getJSONObject(0).getString("okunus") + "\"");
 
-            List<float[]> chunkWaves = new ArrayList<>();
-            List<Integer> chunkSilences = new ArrayList<>();
+            PcmStats rawStats;
+            PcmStats playedStats;
+            String wavPath = null;
+            boolean streamingUsed = chunkCount > 1;
 
-            for (int c = 0; c < chunks.length(); c++) {
+            if (!streamingUsed) {
+                // Single-chunk fast path: synthesize once and play via zero-underrun AudioTrack.MODE_STATIC
                 if (activePlaybackToken.get() != token) {
                     throw new InterruptedException("Konuşma başlatılmadan durduruldu.");
                 }
-                JSONObject chunk = chunks.getJSONObject(c);
+                JSONObject chunk0 = chunks.getJSONObject(0);
                 long sStart = System.currentTimeMillis();
-                float[] chunkPcm = synthesizeSingleChunk(chunk, rate, c);
+                float[] chunkPcm = synthesizeSingleChunk(chunk0, rate, 0);
                 synthElapsedMs += (System.currentTimeMillis() - sStart);
-                chunkWaves.add(chunkPcm);
-                chunkSilences.add(chunk.optInt("silenceAfterMs", 450));
+
+                rawStats = analyzeFloatPcm(chunkPcm);
+                addLog("Ham ses.onnx çıktısı: samples=" + rawStats.sampleCount + ", dur=" + rawStats.durationMs
+                    + "ms, peak=" + rawStats.peak + ", rms=" + rawStats.rms + ", NaN=" + rawStats.nanOrInfCount);
+
+                if (rawStats.nanOrInfCount > 0) {
+                    throw new RuntimeException("ONNX ses.onnx çıktısında NaN/Inf değer tespit edildi (" + rawStats.nanOrInfCount + ").");
+                }
+
+                short[] pcm16 = preparePlaybackPcm16(chunkPcm, rawStats);
+                playedStats = analyzeShortPcm(pcm16);
+
+                if (saveDebugWav) {
+                    File wavFile = new File(dir, LAST_TEST_WAV_NAME);
+                    writeWavFile(wavFile, pcm16, SAMPLE_RATE);
+                    wavPath = wavFile.getAbsolutePath();
+                    addLog("24 kHz 16-bit mono WAV yazıldı: " + wavFile.getName() + " (" + wavFile.length() + " bayt)");
+                }
+
+                if (activePlaybackToken.get() != token) {
+                    throw new InterruptedException("Konuşma durduruldu.");
+                }
+
+                timeToFirstAudioMs = System.currentTimeMillis() - startWallMs;
+                JSObject startPayload = new JSObject();
+                startPayload.put("token", token);
+                startPayload.put("utteranceId", utteranceId);
+                startPayload.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
+                startPayload.put("antaliaUsed", false);
+                startPayload.put("timeToFirstAudioMs", timeToFirstAudioMs);
+                notifyListeners("seslenStart", startPayload);
+
+                playShortPcm16Clean(pcm16, volume, token, utteranceId, logLabel);
+            } else {
+                // Multi-chunk pipelined streaming path: synthesize Chunk 0, start AudioTrack immediately,
+                // then synthesize Chunks 1..N-1 concurrently while Chunk 0..k play.
+                streamQueue = new LinkedBlockingQueue<>();
+                RunningPcmAccumulator rawAcc = new RunningPcmAccumulator();
+                RunningPcmAccumulator playedAcc = new RunningPcmAccumulator();
+                List<short[]> wavBlocks = saveDebugWav ? new ArrayList<>(chunkCount) : null;
+
+                JSONObject chunk0 = chunks.getJSONObject(0);
+                long s0Start = System.currentTimeMillis();
+                float[] wave0 = synthesizeSingleChunk(chunk0, rate, 0);
+                synthElapsedMs += (System.currentTimeMillis() - s0Start);
+
+                PcmStats chunk0RawStats = analyzeFloatPcm(wave0);
+                if (chunk0RawStats.nanOrInfCount > 0) {
+                    throw new RuntimeException("ONNX ses.onnx çıktısında NaN/Inf değer tespit edildi (" + chunk0RawStats.nanOrInfCount + ").");
+                }
+                float dc0 = Math.abs(chunk0RawStats.dcOffset) > 0.001f ? chunk0RawStats.dcOffset : 0.0f;
+                float peak0AfterDc = 0.0f;
+                for (float v : wave0) {
+                    float av = Math.abs((Float.isNaN(v) || Float.isInfinite(v)) ? 0.0f : (v - dc0));
+                    if (av > peak0AfterDc) peak0AfterDc = av;
+                }
+                if (peak0AfterDc < 1e-5f) {
+                    throw new RuntimeException("ses.onnx ilk parça çıktısı sessiz/sıfır (peak=" + peak0AfterDc + ").");
+                }
+                float utteranceScale = Math.min(2.2f, 0.90f / Math.max(peak0AfterDc, 0.35f));
+
+                int silence0Ms = chunk0.optInt("silenceAfterMs", 450);
+                rawAcc.addFloats(wave0);
+                rawAcc.addGapSamples((SAMPLE_RATE * Math.max(0, silence0Ms)) / 1000);
+
+                short[] pcm0 = convertStreamingChunkToPcm16(wave0, true, false, silence0Ms, dc0, utteranceScale);
+                playedAcc.addShorts(pcm0);
+                if (wavBlocks != null) wavBlocks.add(pcm0);
+                streamQueue.put(new StreamBlock(pcm0, false));
+
+                if (activePlaybackToken.get() != token) {
+                    throw new InterruptedException("Konuşma durduruldu.");
+                }
+
+                final BlockingQueue<StreamBlock> qRef = streamQueue;
+                final AtomicReference<Throwable> playErrRef = new AtomicReference<>(null);
+                playerThread = new Thread(
+                    () -> streamPlaybackLoop(qRef, volume, token, utteranceId, logLabel, playErrRef),
+                    "SeslenStreamPlayer"
+                );
+
+                timeToFirstAudioMs = System.currentTimeMillis() - startWallMs;
+                JSObject startPayload = new JSObject();
+                startPayload.put("token", token);
+                startPayload.put("utteranceId", utteranceId);
+                startPayload.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
+                startPayload.put("antaliaUsed", false);
+                startPayload.put("timeToFirstAudioMs", timeToFirstAudioMs);
+                notifyListeners("seslenStart", startPayload);
+
+                addLog("Streaming boru hattı başlatıldı (parça=0/" + chunkCount + ", ilk ses=" + timeToFirstAudioMs + " ms).");
+                playerThread.start();
+
+                for (int c = 1; c < chunkCount; c++) {
+                    if (activePlaybackToken.get() != token) {
+                        throw new InterruptedException("Konuşma oynatma sırasında durduruldu.");
+                    }
+                    if (playErrRef.get() != null) {
+                        throw new RuntimeException(playErrRef.get());
+                    }
+                    JSONObject chunk = chunks.getJSONObject(c);
+                    long sStart = System.currentTimeMillis();
+                    float[] wave = synthesizeSingleChunk(chunk, rate, c);
+                    synthElapsedMs += (System.currentTimeMillis() - sStart);
+
+                    PcmStats chunkRawStats = analyzeFloatPcm(wave);
+                    if (chunkRawStats.nanOrInfCount > 0) {
+                        throw new RuntimeException("ONNX ses.onnx parça #" + c + " çıktısında NaN/Inf tespit edildi.");
+                    }
+                    boolean isLast = (c == chunkCount - 1);
+                    int silenceMs = chunk.optInt("silenceAfterMs", 450);
+                    rawAcc.addFloats(wave);
+                    if (!isLast) {
+                        rawAcc.addGapSamples((SAMPLE_RATE * Math.max(0, silenceMs)) / 1000);
+                    }
+
+                    short[] pcmBlock = convertStreamingChunkToPcm16(wave, false, isLast, silenceMs, dc0, utteranceScale);
+                    playedAcc.addShorts(pcmBlock);
+                    if (wavBlocks != null) wavBlocks.add(pcmBlock);
+                    streamQueue.put(new StreamBlock(pcmBlock, false));
+                }
+
+                streamQueue.put(StreamBlock.END);
+                playerThread.join();
+
+                if (playErrRef.get() != null) {
+                    throw new RuntimeException(playErrRef.get());
+                }
+
+                rawStats = rawAcc.toStats();
+                playedStats = playedAcc.toStats();
+
+                if (saveDebugWav && wavBlocks != null && activePlaybackToken.get() == token) {
+                    int totalShorts = 0;
+                    for (short[] b : wavBlocks) totalShorts += b.length;
+                    short[] mergedWav = new short[totalShorts];
+                    int off = 0;
+                    for (short[] b : wavBlocks) {
+                        System.arraycopy(b, 0, mergedWav, off, b.length);
+                        off += b.length;
+                    }
+                    File wavFile = new File(dir, LAST_TEST_WAV_NAME);
+                    writeWavFile(wavFile, mergedWav, SAMPLE_RATE);
+                    wavPath = wavFile.getAbsolutePath();
+                    addLog("24 kHz 16-bit mono WAV yazıldı: " + wavFile.getName() + " (" + wavFile.length() + " bayt)");
+                }
             }
-
-            if (activePlaybackToken.get() != token) {
-                throw new InterruptedException("Konuşma oynatılmadan durduruldu.");
-            }
-
-            float[] rawMerged = concatChunksWithGaps(chunkWaves, chunkSilences);
-            PcmStats rawStats = analyzeFloatPcm(rawMerged);
-            addLog("Ham ses.onnx çıktısı: samples=" + rawStats.sampleCount + ", dur=" + rawStats.durationMs
-                + "ms, min=" + rawStats.min + ", max=" + rawStats.max + ", peak=" + rawStats.peak
-                + ", rms=" + rawStats.rms + ", NaN=" + rawStats.nanOrInfCount);
-
-            if (rawStats.nanOrInfCount > 0) {
-                throw new RuntimeException("ONNX ses.onnx çıktısında NaN/Inf değer tespit edildi (" + rawStats.nanOrInfCount + ").");
-            }
-
-            short[] pcm16 = preparePlaybackPcm16(rawMerged, rawStats);
-            PcmStats playedStats = analyzeShortPcm(pcm16);
-
-            String wavPath = null;
-            if (saveDebugWav) {
-                File wavFile = new File(dir, LAST_TEST_WAV_NAME);
-                writeWavFile(wavFile, pcm16, SAMPLE_RATE);
-                wavPath = wavFile.getAbsolutePath();
-                addLog("24 kHz 16-bit mono WAV yazıldı: " + wavFile.getName() + " (" + wavFile.length() + " bayt, peak=" + playedStats.peak + ", rms=" + playedStats.rms + ")");
-            }
-
-            if (activePlaybackToken.get() != token) {
-                throw new InterruptedException("Konuşma durduruldu.");
-            }
-
-            JSObject startPayload = new JSObject();
-            startPayload.put("token", token);
-            startPayload.put("utteranceId", utteranceId);
-            startPayload.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
-            startPayload.put("antaliaUsed", false);
-            notifyListeners("seslenStart", startPayload);
-
-            playShortPcm16Clean(pcm16, volume, token, logLabel);
 
             if (activePlaybackToken.get() == token) {
+                long totalWallMs = System.currentTimeMillis() - startWallMs;
                 double rtf = playedStats.durationMs > 0 ? (synthElapsedMs / (double) playedStats.durationMs) : 0.0;
-                addLog("AudioTrack 24 kHz mono oynatma tamamlandı (utteranceId=" + utteranceId + ", RTF=" + String.format(Locale.ROOT, "%.3f", rtf) + "). Antalia-2 Mini'ye hiç başvurulmadı.");
+                addLog("AudioTrack 24 kHz mono oynatma tamamlandı (utteranceId=" + utteranceId
+                    + ", yük=" + modelLoadMs + "ms, g2p=" + g2pMs + "ms, ilkSes=" + timeToFirstAudioMs
+                    + "ms, sentez=" + synthElapsedMs + "ms, ses=" + playedStats.durationMs
+                    + "ms, toplam=" + totalWallMs + "ms, RTF=" + String.format(Locale.ROOT, "%.3f", rtf)
+                    + "). Antalia-2 Mini'ye hiç başvurulmadı.");
 
                 JSObject donePayload = new JSObject();
                 donePayload.put("ok", true);
@@ -1193,9 +1520,14 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 donePayload.put("utteranceId", utteranceId);
                 donePayload.put("engineUsed", "SESLEN_ONNX_HASAN_LOCAL");
                 donePayload.put("antaliaUsed", false);
+                donePayload.put("modelLoadMs", modelLoadMs);
+                donePayload.put("g2pMs", g2pMs);
+                donePayload.put("timeToFirstAudioMs", timeToFirstAudioMs);
                 donePayload.put("synthesisMs", synthElapsedMs);
                 donePayload.put("audioDurationMs", playedStats.durationMs);
-                donePayload.put("totalWallMs", System.currentTimeMillis() - startWallMs);
+                donePayload.put("totalWallMs", totalWallMs);
+                donePayload.put("chunkCount", chunkCount);
+                donePayload.put("streamingUsed", streamingUsed);
                 donePayload.put("rtf", Math.round(rtf * 1000.0) / 1000.0);
                 donePayload.put("styleVerification", buildStyleVerificationObj());
                 donePayload.put("rawPcmStats", rawStats.toJson());
@@ -1219,6 +1551,17 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 resolveCall.resolve(res);
             }
         } catch (InterruptedException ie) {
+            if (streamQueue != null) {
+                streamQueue.clear();
+                streamQueue.offer(StreamBlock.END);
+            }
+            if (playerThread != null && playerThread.isAlive()) {
+                playerThread.interrupt();
+                try {
+                    playerThread.join(1200);
+                } catch (InterruptedException ignored) {
+                }
+            }
             stopAudioTrackImmediate();
             notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
             if (resolveCall != null) {
@@ -1232,6 +1575,17 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 resolveCall.resolve(res);
             }
         } catch (Exception e) {
+            if (streamQueue != null) {
+                streamQueue.clear();
+                streamQueue.offer(StreamBlock.END);
+            }
+            if (playerThread != null && playerThread.isAlive()) {
+                playerThread.interrupt();
+                try {
+                    playerThread.join(1200);
+                } catch (InterruptedException ignored) {
+                }
+            }
             stopAudioTrackImmediate();
             notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
             String msg = e.getMessage() != null ? e.getMessage() : "Seslen-TTS sentezi başarısız.";
@@ -1259,6 +1613,117 @@ public class SeslenLocalTtsPlugin extends Plugin {
         }
     }
 
+    private void streamPlaybackLoop(
+        BlockingQueue<StreamBlock> queue,
+        float volume,
+        long token,
+        String utteranceId,
+        String logLabel,
+        AtomicReference<Throwable> errRef
+    ) {
+        AudioTrack track = null;
+        try {
+            AudioAttributes attrs = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build();
+            AudioFormat fmt = new AudioFormat.Builder()
+                .setSampleRate(SAMPLE_RATE)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build();
+            int minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            int bufBytes = Math.max(minBuf, SAMPLE_RATE * 2); // 1 second PCM16 ring buffer
+            track = new AudioTrack(
+                attrs,
+                fmt,
+                bufBytes,
+                AudioTrack.MODE_STREAM,
+                AudioManager.AUDIO_SESSION_ID_GENERATE
+            );
+            track.setVolume(volume);
+            synchronized (audioLock) {
+                activeAudioTrack = track;
+            }
+            addLog("AudioTrack STREAM (" + labelForStream(logLabel) + "): 24000Hz, mono, PCM_16BIT, bufBytes=" + bufBytes);
+            track.play();
+
+            final int sliceShorts = 2400; // 100 ms blocks -> crisp mouth animation without flooding bridge
+            while (activePlaybackToken.get() == token) {
+                StreamBlock block = queue.poll(50, TimeUnit.MILLISECONDS);
+                if (block == null) {
+                    continue;
+                }
+                if (block.isEnd) {
+                    break;
+                }
+                short[] pcm = block.pcm16;
+                int offset = 0;
+                while (offset < pcm.length && activePlaybackToken.get() == token) {
+                    if (isPlaybackPaused.get()) {
+                        synchronized (audioLock) {
+                            if (activeAudioTrack != null && activeAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                                try {
+                                    activeAudioTrack.pause();
+                                } catch (Exception ignored) {
+                                }
+                            }
+                        }
+                        emitMouthLevel(0.0, utteranceId);
+                        Thread.sleep(45);
+                        continue;
+                    } else {
+                        synchronized (audioLock) {
+                            if (activeAudioTrack != null && activeAudioTrack.getPlayState() == AudioTrack.PLAYSTATE_PAUSED) {
+                                try {
+                                    activeAudioTrack.play();
+                                } catch (Exception ignored) {
+                                }
+                            }
+                        }
+                    }
+
+                    int count = Math.min(sliceShorts, pcm.length - offset);
+                    double sumSq = 0.0;
+                    for (int i = 0; i < count; i++) {
+                        double v = pcm[offset + i] / 32768.0;
+                        sumSq += v * v;
+                    }
+                    double rms = Math.sqrt(sumSq / Math.max(1, count));
+                    emitMouthLevel(Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8)), utteranceId);
+                    int written = track.write(pcm, offset, count);
+                    if (written < 0) {
+                        break;
+                    }
+                    offset += count;
+                }
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        } catch (Throwable t) {
+            errRef.set(t);
+        } finally {
+            emitMouthLevel(0.0, utteranceId);
+            if (activePlaybackToken.get() == token) {
+                releaseTrackAfterCompletion();
+            } else {
+                stopAudioTrackImmediate();
+            }
+        }
+    }
+
+    private static String labelForStream(String label) {
+        return label != null ? label : "SeslenStream";
+    }
+
+    private void emitMouthLevel(double level, String utteranceId) {
+        JSObject ev = new JSObject().put("level", level);
+        if (utteranceId != null) {
+            ev.put("utteranceId", utteranceId);
+        }
+        notifyListeners("seslenMouth", ev);
+    }
+
     /**
      * Replays the exact synthesized `last_test_hasan.wav` through AudioTrack without re-running ONNX
      * so playback hardware behavior can be verified independently of inference.
@@ -1280,7 +1745,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 PcmStats stats = analyzeShortPcm(pcm16);
                 addLog("Kaydedilmiş test WAV yeniden çalınıyor: " + LAST_TEST_WAV_NAME + " (" + stats.durationMs + "ms, rms=" + stats.rms + ")");
                 notifyListeners("seslenStart", new JSObject().put("token", token));
-                playShortPcm16Clean(pcm16, volume, token, "LastTestWAV");
+                playShortPcm16Clean(pcm16, volume, token, null, "LastTestWAV");
 
                 JSObject res = new JSObject();
                 res.put("ok", activePlaybackToken.get() == token);
@@ -1325,7 +1790,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 addLog("Resmi Hasan örneği çalınıyor: 24kHz mono 16-bit, dur=" + stats.durationMs + "ms, peak=" + stats.peak + ", rms=" + stats.rms);
 
                 notifyListeners("seslenStart", new JSObject().put("token", token));
-                playShortPcm16Clean(pcm16, volume, token, "OfficialHasanSample");
+                playShortPcm16Clean(pcm16, volume, token, null, "OfficialHasanSample");
 
                 JSObject res = new JSObject();
                 res.put("ok", activePlaybackToken.get() == token);
@@ -1404,20 +1869,16 @@ public class SeslenLocalTtsPlugin extends Plugin {
         JSONArray egriArr = chunk.getJSONArray("egri");
         int L = tokensArr.length();
 
-        long[][] tokens = new long[1][L];
-        float[][] egri = new float[1][L];
+        ByteBuffer tokDirect = ByteBuffer.allocateDirect(L * 8).order(ByteOrder.nativeOrder());
+        LongBuffer tokensBuf = tokDirect.asLongBuffer();
+        ByteBuffer egriDirect = ByteBuffer.allocateDirect(L * 4).order(ByteOrder.nativeOrder());
+        FloatBuffer egriBuf = egriDirect.asFloatBuffer();
         for (int i = 0; i < L; i++) {
-            tokens[0][i] = tokensArr.getLong(i);
-            egri[0][i] = (float) egriArr.getDouble(i);
+            tokensBuf.put(i, tokensArr.getLong(i));
+            egriBuf.put(i, (float) egriArr.getDouble(i));
         }
-
-        float[][] stil256 = new float[1][256];
-        System.arraycopy(hasanStyleVector, 0, stil256[0], 0, 256);
-
-        float[][] ref128 = new float[1][128];
-        float[][] s128 = new float[1][128];
-        System.arraycopy(hasanStyleVector, 0, ref128[0], 0, 128);
-        System.arraycopy(hasanStyleVector, 128, s128[0], 0, 128);
+        tokensBuf.rewind();
+        egriBuf.rewind();
 
         Set<Integer> commaSet = jsonIntSet(chunk.optJSONArray("commaIdx"));
         Set<Integer> semiSet = jsonIntSet(chunk.optJSONArray("semiIdx"));
@@ -1425,12 +1886,12 @@ public class SeslenLocalTtsPlugin extends Plugin {
         int sonHarf = chunk.optInt("sonHarf", 0);
         int payBirim = chunk.optInt("payBirim", 2);
 
-        try (OnnxTensor tokensTensor = OnnxTensor.createTensor(ortEnv, tokens);
-             OnnxTensor stilTensor = OnnxTensor.createTensor(ortEnv, stil256)) {
+        try (OnnxTensor tokensTensor = OnnxTensor.createTensor(ortEnv, tokensBuf, new long[] { 1L, L });
+             OnnxTensor egriTensor = OnnxTensor.createTensor(ortEnv, egriBuf, new long[] { 1L, L })) {
 
-            Map<String, OnnxTensor> metinInputs = new HashMap<>();
+            Map<String, OnnxTensor> metinInputs = new HashMap<>(4);
             metinInputs.put("tokens", tokensTensor);
-            metinInputs.put("stil", stilTensor);
+            metinInputs.put("stil", cachedStil256Tensor);
 
             try (OrtSession.Result metinResult = metinSession.run(metinInputs)) {
                 OnnxTensor dTensor = extractTensor(metinResult, "d");
@@ -1475,31 +1936,29 @@ public class SeslenLocalTtsPlugin extends Plugin {
                     + Arrays.toString(dTensor.getInfo().getShape()) + ", t_en="
                     + Arrays.toString(tEnTensor.getInfo().getShape()) + ", hiza=[1," + L + "," + totalFrames + "]");
 
-                float[][][] hiza = new float[1][L][totalFrames];
+                // Flat zero-initialized direct buffer eliminates jagged 3D float[][][] allocations and JNI copying
+                ByteBuffer hizaDirect = ByteBuffer.allocateDirect(L * totalFrames * 4).order(ByteOrder.nativeOrder());
+                FloatBuffer hizaBuf = hizaDirect.asFloatBuffer();
                 int framePos = 0;
                 for (int i = 0; i < L; i++) {
                     int dur = sureInt[i];
+                    int rowBase = i * totalFrames + framePos;
                     for (int f = 0; f < dur; f++) {
-                        hiza[0][i][framePos + f] = 1.0f;
+                        hizaBuf.put(rowBase + f, 1.0f);
                     }
                     framePos += dur;
                 }
+                hizaBuf.rewind();
 
-                try (OnnxTensor hizaTensor = OnnxTensor.createTensor(ortEnv, hiza);
-                     OnnxTensor sTensor = OnnxTensor.createTensor(ortEnv, s128);
-                     OnnxTensor refTensor = OnnxTensor.createTensor(ortEnv, ref128);
-                     OnnxTensor perdeTensor = OnnxTensor.createTensor(ortEnv, new float[] { 1.0f });
-                     OnnxTensor tonlamaTensor = OnnxTensor.createTensor(ortEnv, new float[] { 1.0f });
-                     OnnxTensor egriTensor = OnnxTensor.createTensor(ortEnv, egri)) {
-
-                    Map<String, OnnxTensor> sesInputs = new HashMap<>();
+                try (OnnxTensor hizaTensor = OnnxTensor.createTensor(ortEnv, hizaBuf, new long[] { 1L, L, totalFrames })) {
+                    Map<String, OnnxTensor> sesInputs = new HashMap<>(10);
                     sesInputs.put("d", dTensor);
                     sesInputs.put("t_en", tEnTensor);
                     sesInputs.put("hiza", hizaTensor);
-                    sesInputs.put("s", sTensor);
-                    sesInputs.put("ref", refTensor);
-                    sesInputs.put("perde", perdeTensor);
-                    sesInputs.put("tonlama", tonlamaTensor);
+                    sesInputs.put("s", cachedS128Tensor);
+                    sesInputs.put("ref", cachedRef128Tensor);
+                    sesInputs.put("perde", cachedPerdeTensor);
+                    sesInputs.put("tonlama", cachedTonlamaTensor);
                     sesInputs.put("egri", egriTensor);
 
                     try (OrtSession.Result sesResult = sesSession.run(sesInputs)) {
@@ -1605,7 +2064,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
         return set;
     }
 
-    private void playShortPcm16Clean(short[] pcm16, float volume, long token, String label) {
+    private void playShortPcm16Clean(short[] pcm16, float volume, long token, String utteranceId, String label) {
         int totalFrames = pcm16.length;
         int totalBytes = totalFrames * 2;
         if (totalBytes <= 0) return;
@@ -1657,7 +2116,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
                             }
                         }
                     }
-                    notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+                    emitMouthLevel(0.0, utteranceId);
                     try {
                         Thread.sleep(45);
                     } catch (InterruptedException ie) {
@@ -1691,7 +2150,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 }
                 double rms = Math.sqrt(sumSq / cnt);
                 double mouthLevel = Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8));
-                notifyListeners("seslenMouth", new JSObject().put("level", mouthLevel));
+                emitMouthLevel(mouthLevel, utteranceId);
                 try {
                     Thread.sleep(45);
                 } catch (InterruptedException ie) {
@@ -1730,7 +2189,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
                             }
                         }
                     }
-                    notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+                    emitMouthLevel(0.0, utteranceId);
                     try {
                         Thread.sleep(45);
                     } catch (InterruptedException ie) {
@@ -1755,13 +2214,13 @@ public class SeslenLocalTtsPlugin extends Plugin {
                     sumSq += v * v;
                 }
                 double rms = Math.sqrt(sumSq / Math.max(1, count));
-                notifyListeners("seslenMouth", new JSObject().put("level", Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8))));
+                emitMouthLevel(Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8)), utteranceId);
                 track.write(pcm16, offset, count);
                 offset += count;
             }
             releaseTrackAfterCompletion();
         }
-        notifyListeners("seslenMouth", new JSObject().put("level", 0.0));
+        emitMouthLevel(0.0, utteranceId);
     }
 
     private void releaseTrackAfterCompletion() {
@@ -1798,12 +2257,31 @@ public class SeslenLocalTtsPlugin extends Plugin {
         }
     }
 
+    private static void closeTensorQuietly(OnnxTensor t) {
+        if (t != null) {
+            try {
+                t.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
     @Override
     protected void handleOnDestroy() {
         activePlaybackToken.incrementAndGet();
         cancelDownloadRequested.set(true);
         stopAudioTrackImmediate();
         synchronized (ortLock) {
+            closeTensorQuietly(cachedStil256Tensor);
+            cachedStil256Tensor = null;
+            closeTensorQuietly(cachedRef128Tensor);
+            cachedRef128Tensor = null;
+            closeTensorQuietly(cachedS128Tensor);
+            cachedS128Tensor = null;
+            closeTensorQuietly(cachedPerdeTensor);
+            cachedPerdeTensor = null;
+            closeTensorQuietly(cachedTonlamaTensor);
+            cachedTonlamaTensor = null;
             if (metinSession != null) {
                 try {
                     metinSession.close();

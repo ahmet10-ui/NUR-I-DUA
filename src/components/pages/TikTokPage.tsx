@@ -1,5 +1,15 @@
 import React, { useState } from 'react';
-import { Radio, AlertTriangle, Coffee, PlugZap, Unplug, ShieldCheck, Server } from 'lucide-react';
+import {
+  Radio,
+  AlertTriangle,
+  Coffee,
+  PlugZap,
+  Unplug,
+  ShieldCheck,
+  Server,
+  FlaskConical,
+  X,
+} from 'lucide-react';
 import { useStudio } from '../../context/StudioContext';
 import { getTikTokStateLabel } from '../../services/tiktokLiveConnectorService';
 
@@ -24,6 +34,12 @@ export const TikTokPage: React.FC = () => {
     updateTikTokConfig,
     attemptTikTokConnect,
     disconnectTikTok,
+    recoveryGap,
+    dismissRecoveryGap,
+    simulationStreamActive,
+    startSimulationSseListener,
+    stopSimulationSseListener,
+    triggerRelaySimulation,
     enqueueGiftEvent,
     simulateSampleCayGift,
   } = useStudio();
@@ -37,6 +53,8 @@ export const TikTokPage: React.FC = () => {
   const [simGiftId, setSimGiftId] = useState(state.gifts[0]?.id || 'Çay');
   const [simQty, setSimQty] = useState(1);
   const [simFeedback, setSimFeedback] = useState<string | null>(null);
+  const [relaySimBusy, setRelaySimBusy] = useState(false);
+  const [relaySimFeedback, setRelaySimFeedback] = useState<string | null>(null);
 
   const statusLabel = getTikTokStateLabel(tiktok.connectionState);
   const statusBadgeClass = getStatusBadgeClass(tiktok.connectionState);
@@ -120,6 +138,37 @@ export const TikTokPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {recoveryGap && (
+        <div
+          role="alert"
+          className="bg-amber-950/40 border border-amber-500/50 p-4 flex items-start justify-between gap-3 text-xs text-amber-100"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-semibold text-amber-200">
+                SSE Olay Kurtarma Uyarısı ({recoveryGap.reason === 'relay_restarted' ? 'Relay Yeniden Başlatıldı' : 'Tampon Boşluğu'})
+              </p>
+              <p className="text-amber-100/90 leading-relaxed">{recoveryGap.message}</p>
+              <p className="text-[11px] text-amber-300/80 font-mono-tabular">
+                Zaman: {new Date(recoveryGap.timestamp).toLocaleTimeString()}
+                {typeof recoveryGap.missedEstimate === 'number'
+                  ? ` · Tahmini Kaçan Olay: ${recoveryGap.missedEstimate}`
+                  : ''}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={dismissRecoveryGap}
+            aria-label="Kurtarma uyarısını kapat"
+            className="text-amber-200 hover:text-white p-1 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Real TikTok LIVE Connector Configuration */}
@@ -375,6 +424,87 @@ export const TikTokPage: React.FC = () => {
               {simFeedback}
             </p>
           )}
+
+          {/* Separated Relay SSE End-to-End Simulation Test Panel */}
+          <div className="pt-4 border-t border-[#16254A] space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <FlaskConical className="w-4 h-4 text-sky-300 shrink-0" />
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-sky-200">
+                  Relay SSE Uçtan Uca Test Paneli
+                </h3>
+              </div>
+              <span className="px-2 py-0.5 text-[10px] border border-sky-500/40 bg-sky-950/40 text-sky-200">
+                Gerçek Yayından Bağımsızdır
+              </span>
+            </div>
+
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              Relay sunucusu yalnızca test ortamında (<code className="font-mono text-slate-200">SIMULATION_ENABLED=true</code>) çalışırken{' '}
+              <code className="font-mono text-slate-200">POST /simulate</code> üzerinden gerçek SSE hattına test olayları yollar; production ortamında 404 ile kapalıdır.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (simulationStreamActive) {
+                    stopSimulationSseListener();
+                    setRelaySimFeedback('Simülasyon SSE dinleyicisi durduruldu.');
+                  } else {
+                    const res = startSimulationSseListener();
+                    setRelaySimFeedback(
+                      res.ok
+                        ? 'Simülasyon SSE test akışı dinleniyor (gerçek TikTok bağlantısı açılmadı).'
+                        : res.error || 'SSE test akışı başlatılamadı.'
+                    );
+                  }
+                }}
+                className={`text-[11px] px-3 py-1.5 border cursor-pointer ${
+                  simulationStreamActive
+                    ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-200'
+                    : 'border-[#29437F] bg-[#070E1F] text-slate-200 hover:bg-[#101C3B]'
+                }`}
+              >
+                {simulationStreamActive ? 'SSE Test Akışını Durdur' : 'SSE Test Akışını Başlat'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {(
+                [
+                  { id: 'follower', label: 'Takipçi' },
+                  { id: 'small_gift', label: '1 Coin Küçük' },
+                  { id: 'mid_gift', label: '75 Coin Orta' },
+                  { id: 'high_gift', label: '200 Coin Yüksek' },
+                  { id: 'yasin_300', label: '300+ Yâsîn Eşiği' },
+                  { id: 'streak', label: 'Seri + repeatEnd' },
+                  { id: 'incomplete_streak', label: 'Yarım Seri Testi' },
+                ] as const
+              ).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  disabled={relaySimBusy}
+                  onClick={async () => {
+                    setRelaySimBusy(true);
+                    const res = await triggerRelaySimulation(item.id);
+                    setRelaySimBusy(false);
+                    setRelaySimFeedback(res.message);
+                  }}
+                  className="bg-[#070E1F] hover:bg-[#112046] disabled:opacity-50 border border-[#233969] text-slate-200 text-[11px] px-2.5 py-2 text-left cursor-pointer"
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+
+            {relaySimFeedback && (
+              <p className="text-[11px] text-sky-200 bg-[#070E1F] border border-sky-500/30 px-3 py-2">
+                {relaySimFeedback}
+              </p>
+            )}
+          </div>
         </div>
       </div>
 

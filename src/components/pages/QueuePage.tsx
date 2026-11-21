@@ -175,7 +175,11 @@ export const QueuePage: React.FC = () => {
                     )}
                     {item.playbackPhase && item.status === 'speaking' && (
                       <span className="px-1.5 py-0.5 text-[10px] border border-emerald-500/40 bg-emerald-950/30 text-emerald-300">
-                        {item.playbackPhase === 'arabic_audio' ? 'Arapça Tilavet' : 'Türkçe Seslendirme'}
+                        {item.playbackPhase === 'yasin_intro'
+                          ? 'Yâsîn Takdimi'
+                          : item.playbackPhase === 'arabic_audio'
+                          ? 'Arapça Tilavet'
+                          : 'Türkçe Seslendirme'}
                       </span>
                     )}
                     <span aria-hidden="true" className="text-slate-600">·</span>

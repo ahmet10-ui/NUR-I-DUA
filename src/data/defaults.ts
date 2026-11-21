@@ -5,6 +5,7 @@ import {
   PrayerCategoryMeta,
   PrayerTemplate,
   TierRuleConfig,
+  YasinRecitationConfig,
 } from '../types/nuridua';
 
 export const PRAYER_CATEGORIES: PrayerCategoryMeta[] = [
@@ -291,11 +292,42 @@ export const DEFAULT_TIER_RULES: TierRuleConfig = {
   smallGiftGreetingTemplate: 'Selâmün aleyküm, {isim}!',
 };
 
+export const DEFAULT_YASIN_RECITATION: YasinRecitationConfig = {
+  id: 'yasin-300-default',
+  title: 'Yâsîn-i Şerîf okunuyor',
+  sourceCitation:
+    "Kur’ân-ı Kerîm · Yâsîn Sûresi (36:1–83 · 83 Ayet) · Kârî: Abdullah Awad Al-Juhani (11:54, 128 kbps · Kaynak: QuranCentral / Islamic Network CDN)",
+  arabicHarekeliHeader:
+    'بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ ۝ يٓسٓ ۝ وَٱلْقُرْءَانِ ٱلْحَكِيمِ ۝ إِنَّكَ لَمِنَ ٱلْمُرْسَلِينَ ۝ عَلَىٰ صِرَٰطٍ مُّسْتَقِيمٍ',
+  turkishMealNotice: '',
+  introSpeechTemplate:
+    'Bismillâhirrahmânirrahîm. Aziz ve muhterem kardeşlerimiz, kıymetli izleyicilerimiz; {isim} kardeşimizin güzel niyetleri ve hayır temennileri vesilesiyle Kur’ân-ı Kerîm’in kalbi olan Yâsîn-i Şerîf Sûresi’ni baştan sona tilavet ediyoruz. Eûzü billâhimineşşeytânirracîm, Bismillâhirrahmânirrahîm.',
+  closingPrayerTemplate:
+    'Sadakallâhülazîm. Okunan bu mübarek Yâsîn-i Şerîf’ten hâsıl olan sevabı evvelâ Sevgili Peygamberimiz Hazreti Muhammed Mustafa sallallâhu aleyhi ve sellem Efendimizin mübarek ruh-i şerîflerine hediye eyledik, vasıl eyle Allah’ım. Kıymetli {isim} kardeşimize bu güzel ikramı ve hayır niyeti için gönülden teşekkür ediyoruz. Yüce Rabbim; {isim} kardeşimizin, muhterem anne ve babasının, aile fertlerinin, evlatlarının ve bütün akrabalarının dünya ve ahiret saadetini daim eyle; sağlık, afiyet, helal rızık ve hanelerine huzur ve bereket ihsan eyle. Bilhassa {isim} kardeşimizin ve cümlemizin ahirete irtihal etmiş anne, baba, dede, nine ve bütün vefat etmiş yakınlarının ruhlarını şad eyle, kabirlerini pür-nur eyle, taksiratlarını affeyle ve cennetinle, cemalinle müşerref eyle. Âmin, ve selâmün alel-mürselîn, velhamdülâhi rabbil-âlemîn.',
+  audioUrl: '/audio/duas/yasin_i_serif_verified.mp3',
+  audioSourceUrl:
+    'https://qurancentral.net/surah/ya-sin/ · https://cdn.islamic.network/quran/audio-surah/128/ar.abdullahawadaljuhani/36.mp3',
+  audioLicense:
+    'Kullanıcı tarafından QuranCentral kullanım izni alındığı teyit edildi (uygulama içine gömme, ticari kullanım, çoğaltma ve dağıtma hakları); izin belgesinin kendisi proje deposunda mevcut değildir.',
+  audioAttribution:
+    'Kârî: Abdullah Awad Al-Juhani — Surah Ya-Sin (36:1–83 · 83 Ayet, 11:54, 128 kbps, Mono) · Kaynak: QuranCentral / Islamic Network CDN',
+  audioSha256: '3cd37c1e1ec60be3b46802ed8aef4c042cd5aa85373e20f2936813161d2bb7b9',
+  expectedFileBytes: 12109585,
+  durationSec: 714.024,
+  durationLabel: '11:54',
+  audioStatus: 'verified_ready',
+  acceptedFormats: ['.mp3', '.m4a', '.ogg', '.wav'],
+  missingAudioInstruction:
+    'Abdullah Awad Al-Juhani Yâsîn MP3 dosyası (/audio/duas/yasin_i_serif_verified.mp3) SHA-256 doğrulaması ile birlikte beklenmektedir (3cd37c1e1ec60be3b46802ed8aef4c042cd5aa85373e20f2936813161d2bb7b9). Dosya eksik veya bozuksa yeniden paketleyin.',
+  updatedAt: nowIso(),
+};
+
 export const createDefaultAppState = (): AppState => ({
   prayers: DEFAULT_PRAYERS,
   gifts: DEFAULT_GIFTS,
   tierRules: { ...DEFAULT_TIER_RULES },
   highTierDuas: DEFAULT_HIGH_TIER_DUAS.map((d) => ({ ...d })),
+  yasinRecitation: { ...DEFAULT_YASIN_RECITATION },
   queue: [],
   history: [],
   queuePaused: false,

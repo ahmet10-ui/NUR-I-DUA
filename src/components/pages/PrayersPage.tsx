@@ -652,7 +652,7 @@ export const PrayersPage: React.FC = () => {
                         className="inline-flex items-center gap-1.5 text-xs text-slate-200 hover:text-white cursor-pointer"
                       >
                         <Volume2 className="w-3.5 h-3.5 text-[#D4B26A]" />
-                        <span>Türkçe Meal &amp; Aile Duasını Dinle</span>
+                        <span>Türkçe Aile Duasını Dinle</span>
                       </button>
                     </div>
 

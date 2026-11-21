@@ -111,8 +111,14 @@ export interface SeslenSpeakTestResult {
   cancelled?: boolean;
   engineUsed?: string;
   antaliaUsed?: boolean;
+  modelLoadMs?: number;
+  g2pMs?: number;
+  timeToFirstAudioMs?: number;
   synthesisMs?: number;
   audioDurationMs?: number;
+  totalWallMs?: number;
+  chunkCount?: number;
+  streamingUsed?: boolean;
   rtf?: number;
   styleVerification?: SeslenStyleVerification;
   rawPcmStats?: SeslenPcmStats;
@@ -159,7 +165,7 @@ interface SeslenLocalTtsPluginContract {
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenStart',
-    listenerFunc: (event: { token: number; utteranceId?: string }) => void
+    listenerFunc: (event: { token: number; utteranceId?: string; timeToFirstAudioMs?: number }) => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenMouth',
@@ -383,7 +389,7 @@ export async function stopSeslenTest(): Promise<void> {
 export async function subscribeSeslenEvents(handlers: {
   onDownloadProgress?: (ev: SeslenDownloadProgressEvent) => void;
   onDownloadError?: (ev: { message: string }) => void;
-  onStart?: (ev: { token: number; utteranceId?: string }) => void;
+  onStart?: (ev: { token: number; utteranceId?: string; timeToFirstAudioMs?: number }) => void;
   onMouth?: (ev: { level: number; utteranceId?: string }) => void;
   onLog?: (ev: { line: string }) => void;
   onDone?: (ev: SeslenSpeakTestResult & { token: number; utteranceId?: string; totalWallMs?: number }) => void;

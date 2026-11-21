@@ -1044,19 +1044,25 @@ export const VoicePage: React.FC = () => {
                       <div className="p-2.5 border border-emerald-500/40 bg-emerald-950/25 text-emerald-200 grid grid-cols-2 sm:grid-cols-4 gap-2">
                         <div>
                           <span className="text-slate-400 block">Motor</span>
-                          <strong className="font-mono text-[11px]">ONNX Hasan (Antalia: Yok)</strong>
+                          <strong className="font-mono text-[11px]">
+                            ONNX Hasan {seslenTestResult.streamingUsed ? `(Stream · ${seslenTestResult.chunkCount ?? 1})` : '(Tek Parça)'}
+                          </strong>
                         </div>
                         <div>
-                          <span className="text-slate-400 block">Sentez / Ses</span>
+                          <span className="text-slate-400 block">Yük / G2P / İlk Ses</span>
+                          <strong className="font-mono-tabular">
+                            {seslenTestResult.modelLoadMs ?? 0} / {seslenTestResult.g2pMs ?? 0} / {seslenTestResult.timeToFirstAudioMs ?? '—'} ms
+                          </strong>
+                        </div>
+                        <div>
+                          <span className="text-slate-400 block">Toplam Sentez / Ses</span>
                           <strong className="font-mono-tabular">{seslenTestResult.synthesisMs} / {seslenTestResult.audioDurationMs} ms</strong>
                         </div>
                         <div>
-                          <span className="text-slate-400 block">RTF</span>
-                          <strong className="font-mono-tabular">{seslenTestResult.rtf}</strong>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 block">Boş RAM</span>
-                          <strong className="font-mono-tabular">{seslenTestResult.memory?.systemAvailMb ?? '—'} MB</strong>
+                          <span className="text-slate-400 block">RTF · Boş RAM</span>
+                          <strong className="font-mono-tabular">
+                            {seslenTestResult.rtf} · {seslenTestResult.memory?.systemAvailMb ?? '—'} MB
+                          </strong>
                         </div>
                       </div>
 

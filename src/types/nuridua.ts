@@ -115,7 +115,9 @@ export interface QueueEvent {
   arabicAudioLicense?: string;
   arabicAudioAttribution?: string;
   arabicAudioStatus?: VerifiedAudioStatus;
-  playbackPhase?: 'arabic_audio' | 'turkish_speech';
+  yasinIntroSpeech?: string;
+  yasinAudioSha256?: string;
+  playbackPhase?: 'yasin_intro' | 'arabic_audio' | 'turkish_speech';
   scholarId: 'scholar_1' | 'scholar_2';
   status: QueueEventStatus;
   attempts: number;
@@ -123,6 +125,28 @@ export interface QueueEvent {
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
+}
+
+export interface YasinRecitationConfig {
+  id: string;
+  title: string;
+  sourceCitation: string;
+  arabicHarekeliHeader: string;
+  turkishMealNotice: string;
+  introSpeechTemplate: string;
+  closingPrayerTemplate: string;
+  audioUrl: string;
+  audioSourceUrl?: string;
+  audioLicense: string;
+  audioAttribution: string;
+  audioSha256?: string;
+  expectedFileBytes?: number;
+  durationSec?: number;
+  durationLabel?: string;
+  audioStatus: VerifiedAudioStatus;
+  acceptedFormats: string[];
+  missingAudioInstruction: string;
+  updatedAt: string;
 }
 
 export type ScholarId = 'scholar_1' | 'scholar_2';
@@ -199,6 +223,9 @@ export interface TikTokConnectionConfig {
 
 export interface TikTokRelayGiftPayload {
   eventId: string;
+  sseEventId?: string;
+  isSimulated?: boolean;
+  replayed?: boolean;
   streakKey: string;
   userId?: string;
   username: string;
@@ -218,6 +245,9 @@ export interface TikTokRelayGiftPayload {
 
 export interface TikTokRelayFollowPayload {
   eventId: string;
+  sseEventId?: string;
+  isSimulated?: boolean;
+  replayed?: boolean;
   dedupeKey: string;
   userId?: string;
   username: string;
@@ -228,12 +258,28 @@ export interface TikTokRelayFollowPayload {
   timestamp: string;
 }
 
+export interface TikTokRecoveryGapInfo {
+  reason: 'relay_restarted' | 'buffer_evicted' | 'sequence_mismatch';
+  message: string;
+  instanceId?: string;
+  previousInstanceId?: string;
+  lastReceivedSeq?: number;
+  oldestAvailableSeq?: number | null;
+  currentSeq?: number;
+  missedEstimate?: number;
+  sseEventId?: string;
+  timestamp: string;
+}
+
 export interface TikTokConnectorStatusPayload {
   state: TikTokConnectionState;
   username: string;
   roomId?: string | null;
   viewerCount?: number | null;
   error?: string | null;
+  sseEventId?: string;
+  instanceId?: string;
+  simulationEnabled?: boolean;
   updatedAt: string;
 }
 
@@ -279,6 +325,7 @@ export interface AppState {
   gifts: GiftRule[];
   tierRules?: TierRuleConfig;
   highTierDuas?: HighTierDuaEntry[];
+  yasinRecitation?: YasinRecitationConfig;
   queue: QueueEvent[];
   history: QueueEvent[];
   queuePaused: boolean;
@@ -314,6 +361,7 @@ export interface TTSSpeakOptions {
   neuralVoiceId?: string;
   tone?: 'calm_elderly' | 'warm_classic';
   fallbackToBrowser?: boolean;
+  forbiddenMealText?: string;
   lang: string;
   rate: number;
   pitch: number;

@@ -15,6 +15,7 @@ import {
   normalizeFollowSessionKey,
   pickNonConsecutiveHighDua,
   pickNonConsecutiveMidPrayer,
+  stripTurkishMeaningFromSpeech,
 } from '../src/services/stage2Flow.ts';
 import {
   containsArabicScript,
@@ -135,6 +136,16 @@ test('High gift (150-299 coins) verified Arabic audio files exist with matching 
       containsArabicScript(turkishSpeech),
       false,
       'Turkish speech output must NEVER contain Arabic script'
+    );
+    assert.equal(
+      turkishSpeech.includes(dua.turkishMeaning),
+      false,
+      `Turkish speech output must NEVER include turkishMeaning (meal) for ${dua.id}`
+    );
+    assert.equal(
+      turkishSpeech.toLowerCase().includes('meali:'),
+      false,
+      `Turkish speech output must NEVER speak meal header for ${dua.id}`
     );
     assert.ok(turkishSpeech.includes('Ahmet'));
     assert.ok(turkishSpeech.toLowerCase().includes('anne'));
@@ -381,4 +392,82 @@ test('Long Turkish prayers chunk cleanly for Android/Antalia-2 Mini and scholar 
 
   const s1 = getScholarProsody(0.9, 0.95, 'scholar_1', { enabled: true, rate: 0.76, pitch: 0.68 });
   assert.deepEqual(s1, { rate: 0.76, pitch: 0.68 });
+});
+
+test('Code-level guard blocks turkishMeaning (meal) from reaching TTS even in legacy queued events', () => {
+  const dua = DEFAULT_HIGH_TIER_DUAS[0];
+  const personalOnly = buildHighTierTurkishSpeech(dua, 'Mehmet');
+  const legacyCombined = `${dua.arabicHarekeli} ${dua.turkishMeaning} ${personalOnly}`;
+  const stripped = stripTurkishMeaningFromSpeech(legacyCombined, dua.turkishMeaning);
+  assert.equal(containsArabicScript(stripped), false);
+  assert.equal(stripped.includes(dua.turkishMeaning), false);
+  assert.equal(stripped, personalOnly);
+
+  let spokenToEngine = '';
+  let completed = false;
+  executeStage2PlaybackSequence({
+    event: {
+      id: 'evt_legacy_meal',
+      dedupeKey: 'dk_legacy_meal',
+      source: 'simulation',
+      eventType: 'gift',
+      tier: 'high_gift',
+      username: 'mehmet',
+      displayUsername: 'Mehmet',
+      giftId: 'legacy_200',
+      giftName: 'Asa',
+      quantity: 1,
+      unitCoins: 200,
+      eventCoins: 200,
+      priority: 'high',
+      category: 'family_peace',
+      prayerId: dua.id,
+      prayerTitle: dua.title,
+      renderedPrayer: legacyCombined,
+      arabicHarekeli: dua.arabicHarekeli,
+      turkishMeaning: dua.turkishMeaning,
+      arabicAudioUrl: '',
+      arabicAudioStatus: 'pending_license_verification',
+      scholarId: 'scholar_1',
+      status: 'speaking',
+      attempts: 1,
+      createdAt: new Date().toISOString(),
+    },
+    arabicPlayer: {
+      play() {
+        assert.fail('Unverified audio should not play');
+      },
+      pause() {},
+      resume() {},
+      stop() {},
+    },
+    turkishTts: {
+      speak(text, opts) {
+        spokenToEngine = text;
+        opts.onStart?.();
+        opts.onEnd?.();
+      },
+      pause() {},
+      resume() {},
+      stop() {},
+    },
+    ttsOptions: {
+      scholarId: 'scholar_1',
+      lang: 'tr-TR',
+      rate: 0.94,
+      pitch: 1.0,
+      volume: 0.95,
+    },
+    onComplete: () => {
+      completed = true;
+    },
+    onError: (err) => {
+      assert.fail(`Unexpected error: ${err}`);
+    },
+  });
+
+  assert.equal(completed, true);
+  assert.equal(containsArabicScript(spokenToEngine), false);
+  assert.equal(spokenToEngine.includes(dua.turkishMeaning), false);
+  assert.equal(spokenToEngine, personalOnly);
 });

@@ -23,6 +23,14 @@ import {
   stopSeslenQueue,
   subscribeSeslenEvents,
 } from './nativeSeslenTtsBridge';
+import {
+  isNativeArabicAudioPluginAvailable,
+  pauseNativeArabicAudio,
+  playNativeArabicAudio,
+  resumeNativeArabicAudio,
+  stopNativeArabicAudio,
+  subscribeNativeArabicAudioEvents,
+} from './nativeArabicAudioBridge';
 
 export interface AvailableVoice {
   voiceURI: string;
@@ -290,6 +298,29 @@ export function stripArabicScriptForTurkishTts(text: string): string {
     .replace(/\s+/g, ' ')
     .replace(/\s+([.,;!?])/g, '$1')
     .trim();
+}
+
+export function sanitizeTurkishTtsPayload(text: string, forbiddenMealText?: string): string {
+  let clean = containsArabicScript(text || '')
+    ? stripArabicScriptForTurkishTts(text || '')
+    : (text || '').trim();
+  if (!clean) return '';
+
+  if (forbiddenMealText && forbiddenMealText.trim()) {
+    const cleanMeal = stripArabicScriptForTurkishTts(forbiddenMealText);
+    const normalizeWs = (s: string) => s.replace(/\s+/g, ' ').trim();
+    const normClean = normalizeWs(clean);
+    const normMeal = normalizeWs(cleanMeal);
+    if (normMeal) {
+      const idx = normClean.indexOf(normMeal);
+      if (idx !== -1) {
+        clean = normalizeWs(normClean.slice(0, idx) + ' ' + normClean.slice(idx + normMeal.length));
+      } else if (normClean.includes(forbiddenMealText.trim())) {
+        clean = normalizeWs(normClean.split(forbiddenMealText.trim()).join(' '));
+      }
+    }
+  }
+  return clean;
 }
 
 /**
@@ -1331,13 +1362,11 @@ export class StudioTTSRouter implements ITTSProvider {
   speak(text: string, options: TTSSpeakOptions): void {
     this.stop();
 
-    // Hard safety guard: Arabic script must NEVER be synthesized with Turkish TTS engines.
-    const safeTurkishText = containsArabicScript(text)
-      ? stripArabicScriptForTurkishTts(text)
-      : text;
+    // Hard safety guard: Arabic script and display-only Turkish meal text must NEVER reach any Turkish TTS engine.
+    const safeTurkishText = sanitizeTurkishTtsPayload(text, options.forbiddenMealText);
     if (!safeTurkishText.trim()) {
       options.onError?.(
-        'Arapça metin Türkçe TTS motorlarına (Seslen-TTS / Antalia-2 Mini) gönderilemez.'
+        'Arapça metin veya yalnızca ekranda gösterilen Türkçe meal metni TTS motorlarına (Seslen-TTS / Antalia-2 Mini) gönderilemez.'
       );
       return;
     }
@@ -1415,28 +1444,123 @@ export class StudioTTSRouter implements ITTSProvider {
 
 export interface AudioClipPlayOptions {
   volume: number;
-  onStart?: () => void;
+  expectedSha256?: string;
+  onStart?: (info?: { durationMs?: number }) => void;
   onMouthLevel?: (level: number) => void;
+  onProgress?: (info: { positionMs: number; durationMs: number }) => void;
   onEnd?: () => void;
   onError?: (reason: string) => void;
 }
 
+export interface AudioSha256VerificationResult {
+  ok: boolean;
+  actualSha256?: string;
+  byteLength?: number;
+  blob?: Blob;
+  error?: string;
+}
+
+export async function verifyAudioUrlSha256(
+  url: string,
+  expectedSha256: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal
+): Promise<AudioSha256VerificationResult> {
+  const expected = (expectedSha256 || '').trim().toLowerCase();
+  if (!expected) {
+    return { ok: false, error: 'Beklenen SHA-256 doğrulama özeti boş.' };
+  }
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || typeof subtle.digest !== 'function') {
+    return { ok: false, error: 'Web Crypto SHA-256 motoru bu ortamda kullanılamıyor.' };
+  }
+
+  let res: Response;
+  try {
+    res = await fetchImpl(url, { cache: 'no-store', signal });
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? `Ses dosyası indirilemedi veya okunamadı (${url}): ${err.message}`
+          : `Ses dosyası indirilemedi (${url}).`,
+    };
+  }
+
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: `Ses dosyası bulunamadı veya erişilemedi (${url}, HTTP ${res.status}).`,
+    };
+  }
+
+  let buffer: ArrayBuffer;
+  try {
+    buffer = await res.arrayBuffer();
+  } catch (err) {
+    return {
+      ok: false,
+      error:
+        err instanceof Error
+          ? `Ses dosyası içeriği okunamadı (${url}): ${err.message}`
+          : `Ses dosyası içeriği okunamadı (${url}).`,
+    };
+  }
+
+  if (!buffer || buffer.byteLength <= 0) {
+    return { ok: false, error: `Ses dosyası boş (0 bayt): ${url}.` };
+  }
+
+  const digest = await subtle.digest('SHA-256', buffer);
+  const actualSha256 = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  if (actualSha256 !== expected) {
+    return {
+      ok: false,
+      actualSha256,
+      byteLength: buffer.byteLength,
+      error: `Ses dosyası SHA-256 doğrulaması başarısız (beklenen: ${expected.slice(0, 12)}…, okunan: ${actualSha256.slice(0, 12)}…).`,
+    };
+  }
+
+  const contentType = res.headers?.get?.('content-type') || 'audio/mpeg';
+  return {
+    ok: true,
+    actualSha256,
+    byteLength: buffer.byteLength,
+    blob: new Blob([buffer], { type: contentType }),
+  };
+}
+
 /**
  * Plays verified, reuse-licensed human/Qari Arabic audio clips (e.g. CC0 MP3 bundled under `/audio/duas/`).
- * Enforces an active-playback flag and token isolation so no incoming event can cut off ongoing recitation.
+ * On Android APK builds, delegates to native `NurIDuaAudio` (MediaPlayer + PARTIAL_WAKE_LOCK + AudioFocus)
+ * with native AssetManager SHA-256 verification before preparing MediaPlayer.
+ * On Web/Browser builds, verifies expectedSha256 via Web Crypto before playing when crypto.subtle is available.
+ * Enforces active-playback flag and token/playbackId isolation so incoming events never interrupt active audio.
  */
 export class VerifiedAudioClipPlayer {
   private audioEl: HTMLAudioElement | null = null;
+  private objectUrl: string | null = null;
+  private webAbortController: AbortController | null = null;
   private audioCtx: AudioContext | null = null;
   private sourceNode: MediaElementAudioSourceNode | null = null;
   private analyser: AnalyserNode | null = null;
   private rafId: number | null = null;
   private fallbackTimer: number | null = null;
+  private nativeUnsubListeners: (() => void) | null = null;
+  private activeNativePlaybackId: string | null = null;
+  private playbackMode: 'web' | 'native' | null = null;
+  private playbackCounter = 0;
   private isPaused = false;
   private isPlayingInternal = false;
   private playbackToken = 0;
 
   isSupported(): boolean {
+    if (isNativeArabicAudioPluginAvailable()) return true;
     return typeof window !== 'undefined' && typeof Audio !== 'undefined';
   }
 
@@ -1461,6 +1585,13 @@ export class VerifiedAudioClipPlayer {
     return this.audioCtx;
   }
 
+  private detachNativeListeners() {
+    if (this.nativeUnsubListeners) {
+      this.nativeUnsubListeners();
+      this.nativeUnsubListeners = null;
+    }
+  }
+
   private cleanupAudio(resetMouth?: (level: number) => void) {
     if (this.rafId !== null) {
       window.cancelAnimationFrame(this.rafId);
@@ -1470,6 +1601,16 @@ export class VerifiedAudioClipPlayer {
       window.clearInterval(this.fallbackTimer);
       this.fallbackTimer = null;
     }
+    if (this.webAbortController) {
+      try {
+        this.webAbortController.abort();
+      } catch {
+        // ignore
+      }
+      this.webAbortController = null;
+    }
+    this.detachNativeListeners();
+    this.activeNativePlaybackId = null;
     if (this.sourceNode) {
       try {
         this.sourceNode.disconnect();
@@ -1496,44 +1637,32 @@ export class VerifiedAudioClipPlayer {
       }
       this.audioEl = null;
     }
+    if (this.objectUrl) {
+      try {
+        URL.revokeObjectURL(this.objectUrl);
+      } catch {
+        // ignore
+      }
+      this.objectUrl = null;
+    }
+    this.playbackMode = null;
     this.isPaused = false;
     this.isPlayingInternal = false;
     resetMouth?.(0);
   }
 
-  play(url: string, options: AudioClipPlayOptions): void {
-    this.stop();
-    const token = ++this.playbackToken;
-
-    if (!this.isSupported()) {
-      options.onError?.('Tarayıcı doğrulanmış ses dosyası oynatmayı desteklemiyor.');
-      return;
-    }
-
-    const cleanUrl = url.trim();
-    if (!cleanUrl) {
-      options.onError?.('Arapça ses dosyası adresi boş.');
-      return;
-    }
-
-    const audio = new Audio(cleanUrl);
+  private startWebAudioElement(
+    playbackSrc: string,
+    displayUrl: string,
+    options: AudioClipPlayOptions,
+    token: number,
+    finish: (isErr?: boolean, msg?: string) => void
+  ): void {
+    if (this.playbackToken !== token) return;
+    const audio = new Audio(playbackSrc);
     audio.preload = 'auto';
     audio.volume = Math.min(1, Math.max(0, options.volume));
     this.audioEl = audio;
-    this.isPlayingInternal = true;
-    this.isPaused = false;
-
-    let finished = false;
-    const finish = (isErr = false, msg?: string) => {
-      if (finished || this.playbackToken !== token) return;
-      finished = true;
-      this.cleanupAudio(options.onMouthLevel);
-      if (isErr) {
-        options.onError?.(msg || 'Doğrulanmış Arapça ses dosyası oynatılamadı.');
-      } else {
-        options.onEnd?.();
-      }
-    };
 
     let analyserReady = false;
     try {
@@ -1558,7 +1687,7 @@ export class VerifiedAudioClipPlayer {
     let smoothedLevel = 0;
 
     const tickAnalyser = () => {
-      if (finished || this.playbackToken !== token) return;
+      if (this.playbackToken !== token) return;
       if (this.isPaused || audio.paused) {
         options.onMouthLevel?.(0);
       } else if (this.analyser && dataBuffer) {
@@ -1576,9 +1705,17 @@ export class VerifiedAudioClipPlayer {
       this.rafId = window.requestAnimationFrame(tickAnalyser);
     };
 
+    audio.ontimeupdate = () => {
+      if (this.playbackToken !== token) return;
+      const durationMs = Number.isFinite(audio.duration) ? Math.round(audio.duration * 1000) : 0;
+      const positionMs = Math.round((audio.currentTime || 0) * 1000);
+      options.onProgress?.({ positionMs, durationMs });
+    };
+
     audio.onplay = () => {
-      if (finished || this.playbackToken !== token) return;
-      options.onStart?.();
+      if (this.playbackToken !== token) return;
+      const durationMs = Number.isFinite(audio.duration) ? Math.round(audio.duration * 1000) : undefined;
+      options.onStart?.({ durationMs });
       if (analyserReady) {
         if (this.rafId === null) {
           this.rafId = window.requestAnimationFrame(tickAnalyser);
@@ -1586,7 +1723,7 @@ export class VerifiedAudioClipPlayer {
       } else if (this.fallbackTimer === null) {
         const startTs = performance.now();
         this.fallbackTimer = window.setInterval(() => {
-          if (finished || this.playbackToken !== token || this.isPaused || audio.paused) {
+          if (this.playbackToken !== token || this.isPaused || audio.paused) {
             options.onMouthLevel?.(0);
             return;
           }
@@ -1598,7 +1735,7 @@ export class VerifiedAudioClipPlayer {
     };
 
     audio.onended = () => finish(false);
-    audio.onerror = () => finish(true, `Ses dosyası yüklenemedi veya çözülemedi (${cleanUrl}).`);
+    audio.onerror = () => finish(true, `Ses dosyası yüklenemedi veya çözülemedi (${displayUrl}).`);
 
     void audio.play().catch((err) => {
       finish(
@@ -1608,8 +1745,148 @@ export class VerifiedAudioClipPlayer {
     });
   }
 
+  play(url: string, options: AudioClipPlayOptions): void {
+    this.stop();
+    const token = ++this.playbackToken;
+
+    if (!this.isSupported()) {
+      options.onError?.('Tarayıcı doğrulanmış ses dosyası oynatmayı desteklemiyor.');
+      return;
+    }
+
+    const cleanUrl = url.trim();
+    if (!cleanUrl) {
+      options.onError?.('Arapça ses dosyası adresi boş.');
+      return;
+    }
+
+    // Native Android path: NurIDuaAudio (MediaPlayer + AudioFocus + PARTIAL_WAKE_LOCK)
+    if (isNativeArabicAudioPluginAvailable()) {
+      this.playbackMode = 'native';
+      this.isPlayingInternal = true;
+      this.isPaused = false;
+      const playbackId = `qari_${Date.now()}_${++this.playbackCounter}`;
+      this.activeNativePlaybackId = playbackId;
+
+      let finished = false;
+      const finishNative = (isErr = false, msg?: string) => {
+        if (finished || this.playbackToken !== token) return;
+        finished = true;
+        this.cleanupAudio(options.onMouthLevel);
+        if (isErr) {
+          options.onError?.(msg || 'Android Arapça ses kaydı oynatılamadı.');
+        } else {
+          options.onEnd?.();
+        }
+      };
+
+      const runNative = async () => {
+        try {
+          const unsub = await subscribeNativeArabicAudioEvents({
+            onStart: (ev) => {
+              if (finished || this.playbackToken !== token) return;
+              if (ev.playbackId !== this.activeNativePlaybackId) return;
+              options.onStart?.({ durationMs: ev.durationMs });
+            },
+            onProgress: (ev) => {
+              if (finished || this.playbackToken !== token || this.isPaused) return;
+              if (ev.playbackId !== this.activeNativePlaybackId) return;
+              options.onMouthLevel?.(ev.level);
+              options.onProgress?.({ positionMs: ev.positionMs, durationMs: ev.durationMs });
+            },
+            onDone: (ev) => {
+              if (finished || this.playbackToken !== token) return;
+              if (ev.playbackId !== this.activeNativePlaybackId) return;
+              finishNative(false);
+            },
+            onError: (ev) => {
+              if (finished || this.playbackToken !== token) return;
+              if (ev.playbackId && ev.playbackId !== this.activeNativePlaybackId) return;
+              finishNative(true, ev.message || 'Android Arapça ses dosyası çalma hatası.');
+            },
+          });
+
+          if (finished || this.playbackToken !== token) {
+            unsub();
+            return;
+          }
+          this.nativeUnsubListeners = unsub;
+
+          const res = await playNativeArabicAudio({
+            url: cleanUrl,
+            playbackId,
+            volume: Math.min(1, Math.max(0, options.volume)),
+            expectedSha256: options.expectedSha256,
+          });
+
+          if (finished || this.playbackToken !== token) return;
+          if (!res.ok) {
+            finishNative(true, res.error || `Arapça ses dosyası yüklenemedi (${cleanUrl}).`);
+          }
+        } catch (err) {
+          finishNative(
+            true,
+            err instanceof Error ? err.message : 'Android NurIDuaAudio oynatma başlatılamadı.'
+          );
+        }
+      };
+
+      void runNative();
+      return;
+    }
+
+    // Web / Browser path: verify expectedSha256 when Web Crypto is available, then play via HTMLAudioElement
+    this.playbackMode = 'web';
+    this.isPlayingInternal = true;
+    this.isPaused = false;
+
+    let finished = false;
+    const finish = (isErr = false, msg?: string) => {
+      if (finished || this.playbackToken !== token) return;
+      finished = true;
+      this.cleanupAudio(options.onMouthLevel);
+      if (isErr) {
+        options.onError?.(msg || 'Doğrulanmış Arapça ses dosyası oynatılamadı.');
+      } else {
+        options.onEnd?.();
+      }
+    };
+
+    const expectedSha = (options.expectedSha256 || '').trim().toLowerCase();
+    const canVerifyWebSha =
+      Boolean(expectedSha) &&
+      typeof fetch === 'function' &&
+      Boolean(globalThis.crypto?.subtle?.digest) &&
+      typeof URL !== 'undefined' &&
+      typeof URL.createObjectURL === 'function';
+
+    if (canVerifyWebSha) {
+      const controller = new AbortController();
+      this.webAbortController = controller;
+      void (async () => {
+        const result = await verifyAudioUrlSha256(cleanUrl, expectedSha, fetch, controller.signal);
+        if (controller.signal.aborted || finished || this.playbackToken !== token) return;
+        this.webAbortController = null;
+        if (!result.ok || !result.blob) {
+          finish(true, result.error || `Ses dosyası SHA-256 doğrulamasından geçemedi (${cleanUrl}).`);
+          return;
+        }
+        const blobUrl = URL.createObjectURL(result.blob);
+        this.objectUrl = blobUrl;
+        this.startWebAudioElement(blobUrl, cleanUrl, options, token, finish);
+      })();
+      return;
+    }
+
+    this.startWebAudioElement(cleanUrl, cleanUrl, options, token, finish);
+  }
+
   pause(): void {
     this.isPaused = true;
+    if (this.playbackMode === 'native') {
+      void pauseNativeArabicAudio();
+      return;
+    }
     if (this.audioEl && !this.audioEl.paused) {
       this.audioEl.pause();
     }
@@ -1617,6 +1894,10 @@ export class VerifiedAudioClipPlayer {
 
   resume(): void {
     this.isPaused = false;
+    if (this.playbackMode === 'native') {
+      void resumeNativeArabicAudio();
+      return;
+    }
     if (this.audioEl && this.audioEl.paused) {
       this.audioEl.play().catch(() => {
         // ignore
@@ -1626,6 +1907,9 @@ export class VerifiedAudioClipPlayer {
 
   stop(): void {
     this.playbackToken++;
+    if (this.playbackMode === 'native') {
+      void stopNativeArabicAudio();
+    }
     this.cleanupAudio();
   }
 }

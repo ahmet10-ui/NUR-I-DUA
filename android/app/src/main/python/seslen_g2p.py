@@ -40,6 +40,13 @@ def _load_semboller(semboller_path: str) -> dict[str, int]:
     return _semboller_cache[semboller_path]
 
 
+def warm_up(semboller_path: str) -> dict[str, Any]:
+    """Preloads semboller.json and initializes Python G2P caches at startup."""
+    semboller = _load_semboller(semboller_path)
+    sample_okunus = g2p("merhaba", vurgu=True)
+    return {"ok": True, "symbolCount": len(semboller), "warmSampleLen": len(sample_okunus)}
+
+
 def _kucuk(s: str) -> str:
     return s.replace("I", "ı").replace("İ", "i").lower()
 
@@ -105,19 +112,25 @@ def _soru_egrisi(okunus: str, sozluk: dict[str, int]) -> list[float]:
     return [float(e) for c, e in zip(okunus, ek) if c in sozluk]
 
 
-def _kisa_bitis(metin: str, semboller: dict[str, int]) -> int:
+def _kisa_bitis(
+    metin: str, semboller: dict[str, int], nokta_set: set[int]
+) -> tuple[int, str | None]:
     s = metin.strip()
     if len(s.split()) > KISA_SOZCUK or not s.endswith((".", "!")):
-        return 0
-    kod = [semboller[c] for c in g2p(s, vurgu=True) if c in semboller]
-    uzun = [semboller[c] for c in g2p(s + TASIYICI, vurgu=True) if c in semboller]
+        return 0, None
+    okunus_s = g2p(s, vurgu=True)
+    kod = [semboller[c] for c in okunus_s if c in semboller]
+    okunus_uzun = g2p(s + TASIYICI, vurgu=True)
+    uzun = [semboller[c] for c in okunus_uzun if c in semboller]
+    same_raw = s == metin
     if uzun[:len(kod)] != kod:
-        return 0
-    nokta = {semboller[c] for c in ".!…," if c in semboller}
+        return 0, (okunus_s if same_raw else None)
     son = len(kod)
-    while son > 1 and kod[son - 1] in nokta:
+    while son > 1 and kod[son - 1] in nokta_set:
         son -= 1
-    return son
+    if son > 0:
+        return son, (okunus_uzun if same_raw else None)
+    return 0, (okunus_s if same_raw else None)
 
 
 def _son_harf(kod: list[int], semboller: dict[str, int]) -> int:
@@ -138,14 +151,15 @@ def prepare_chunks(text: str, semboller_path: str) -> str:
     virgul_id = semboller.get(",", -1)
     noktali_id = semboller.get(";", -1)
     iki_nokta_id = semboller.get(":", -1)
+    nokta_set = {semboller[c] for c in ".!…," if c in semboller}
 
     chunks_out: list[dict[str, Any]] = []
     for cumle, paragraf_sonu in _bolumler(text):
         parcalar = virgulden_bol(cumle, PARCA_SOZCUK)
         for j, p in enumerate(parcalar):
-            bitis = _kisa_bitis(p, semboller)
+            bitis, cached_okunus = _kisa_bitis(p, semboller, nokta_set)
             kaynak = (p + TASIYICI) if bitis > 0 else p
-            okunus = g2p(kaynak, vurgu=True)
+            okunus = cached_okunus if cached_okunus is not None else g2p(kaynak, vurgu=True)
             kod = [semboller[c] for c in okunus if c in semboller]
             if not kod:
                 continue

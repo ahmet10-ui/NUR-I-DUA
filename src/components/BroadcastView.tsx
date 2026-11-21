@@ -87,6 +87,8 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                     <p className="text-[9px] tracking-[0.16em] uppercase text-[#D4B26A] leading-tight">
                       {activeEvent.eventType === 'follow'
                         ? 'Yeni Takipçi'
+                        : activeEvent.tier === 'yasin_300'
+                        ? 'Yâsîn-i Şerîf Tilaveti'
                         : activeEvent.tier === 'high_gift'
                         ? 'Yüksek Seviye Dua Niyeti'
                         : 'Dua Niyeti'}
@@ -120,6 +122,8 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                             ? 'Başlangıç Duası'
                             : activeEvent.tier === 'high_gift'
                             ? 'Arapça Dua & Aile Duası'
+                            : activeEvent.tier === 'yasin_300'
+                            ? 'Tam Yâsîn-i Şerîf'
                             : categoryMeta?.labelTr || activeEvent.category}
                         </p>
                       </>
@@ -170,16 +174,21 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                   <span className="truncate">{activeScholarProfile.name}</span>
                   <span aria-hidden="true">·</span>
                   <span className="truncate">{activeEvent.prayerTitle}</span>
-                  {activeEvent.tier === 'high_gift' && activeEvent.playbackPhase && (
-                    <>
-                      <span aria-hidden="true">·</span>
-                      <span className="shrink-0 text-[#F7E7C4]">
-                        {activeEvent.playbackPhase === 'arabic_audio'
-                          ? 'Arapça Tilavet'
-                          : 'Türkçe Meal & Dua'}
-                      </span>
-                    </>
-                  )}
+                  {(activeEvent.tier === 'high_gift' || activeEvent.tier === 'yasin_300') &&
+                    activeEvent.playbackPhase && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="shrink-0 text-[#F7E7C4]">
+                          {activeEvent.playbackPhase === 'yasin_intro'
+                            ? 'Yâsîn Takdimi'
+                            : activeEvent.playbackPhase === 'arabic_audio'
+                            ? activeEvent.tier === 'yasin_300'
+                              ? 'Kârî Tilaveti'
+                              : 'Arapça Tilavet'
+                            : 'Türkçe Dua'}
+                        </span>
+                      </>
+                    )}
                 </div>
                 {broadcast.goldAnimationsEnabled && (
                   <div className="my-1.5 mx-auto h-px w-20 gold-shimmer-line" />
@@ -198,6 +207,11 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                         Kaynak: {activeEvent.sourceCitation}
                       </p>
                     )}
+                    {activeEvent.tier !== 'yasin_300' && activeEvent.turkishMeaning && (
+                      <p className="mt-1 pt-1 border-t border-[#C9A45C]/15 text-[10px] sm:text-[11px] leading-snug text-slate-300/90 text-left line-clamp-2">
+                        <span className="text-[#D4B26A] font-medium">Meal:</span> {activeEvent.turkishMeaning}
+                      </p>
+                    )}
                   </div>
                 )}
                 <p
@@ -205,7 +219,11 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                     activeEvent.arabicHarekeli ? 'line-clamp-3' : 'line-clamp-4'
                   }`}
                 >
-                  {activeEvent.renderedPrayer}
+                  {activeEvent.tier === 'yasin_300' && activeEvent.playbackPhase === 'arabic_audio'
+                    ? 'Yâsîn-i Şerîf okunuyor'
+                    : activeEvent.playbackPhase === 'yasin_intro' && activeEvent.yasinIntroSpeech
+                    ? activeEvent.yasinIntroSpeech
+                    : activeEvent.renderedPrayer}
                 </p>
               </motion.div>
             ) : (

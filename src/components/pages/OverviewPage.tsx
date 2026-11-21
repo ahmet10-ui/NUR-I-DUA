@@ -336,7 +336,13 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
                 <span>
                   {activeScholar.name} · {activeEvent.source === 'simulation' ? 'Simulation' : 'Live'}
                   {activeEvent.playbackPhase
-                    ? ` · ${activeEvent.playbackPhase === 'arabic_audio' ? 'Arapça Tilavet' : 'Türkçe Dua'}`
+                    ? ` · ${
+                        activeEvent.playbackPhase === 'yasin_intro'
+                          ? 'Yâsîn Takdimi'
+                          : activeEvent.playbackPhase === 'arabic_audio'
+                          ? 'Arapça Tilavet'
+                          : 'Türkçe Dua'
+                      }`
                     : ''}
                 </span>
                 <span className="font-mono-tabular">{activeEvent.id}</span>
@@ -347,7 +353,11 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
                 </p>
               )}
               <p className="mt-2 font-display text-lg text-white leading-snug">
-                {activeEvent.renderedPrayer}
+                {activeEvent.tier === 'yasin_300' && activeEvent.playbackPhase === 'arabic_audio'
+                  ? 'Yâsîn-i Şerîf okunuyor'
+                  : activeEvent.playbackPhase === 'yasin_intro' && activeEvent.yasinIntroSpeech
+                  ? activeEvent.yasinIntroSpeech
+                  : activeEvent.renderedPrayer}
               </p>
             </div>
           )}

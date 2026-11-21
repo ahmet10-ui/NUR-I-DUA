@@ -135,7 +135,7 @@ export const GiftsPage: React.FC = () => {
     setNotice('Seviye durumu güncellendi.');
   };
 
-  const runStage2Sim = (mode: 'follow' | 'small' | 'mid' | 'high') => {
+  const runStage2Sim = (mode: 'follow' | 'small' | 'mid' | 'high' | 'yasin') => {
     if (mode === 'follow') {
       const res = enqueueFollowEvent({ source: 'simulation', username: simSampleUser });
       setNotice(
@@ -150,6 +150,7 @@ export const GiftsPage: React.FC = () => {
       small: { giftIdOrName: 'Simülasyon Gülü', unitCoins: tierDraft.smallGiftMinCoins },
       mid: { giftIdOrName: 'Simülasyon Buket', unitCoins: tierDraft.midGiftMinCoins },
       high: { giftIdOrName: 'Simülasyon Tacı', unitCoins: tierDraft.highGiftMinCoins },
+      yasin: { giftIdOrName: 'Simülasyon Yâsîn Hediyesi', unitCoins: tierDraft.yasinMinCoins },
     }[mode];
 
     const res = enqueueGiftEvent({
@@ -194,7 +195,7 @@ export const GiftsPage: React.FC = () => {
     {
       key: 'yasinEnabled',
       title: 'Yâsîn-i Şerîf',
-      subtitle: `${effectiveTierRules.yasinMinCoins}+ Jeton · Aşama 3`,
+      subtitle: `${effectiveTierRules.yasinMinCoins}+ Jeton · Tam Yâsîn`,
     },
   ];
 
@@ -283,10 +284,18 @@ export const GiftsPage: React.FC = () => {
             <button
               type="button"
               onClick={() => runStage2Sim('high')}
-              className="inline-flex items-center gap-1 bg-[#C9A45C] hover:bg-[#D7B46E] px-2.5 py-1.5 text-xs font-semibold text-[#070D1B] cursor-pointer"
+              className="inline-flex items-center gap-1 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] px-2.5 py-1.5 text-xs text-[#E5C88B] cursor-pointer"
             >
               <Sparkles className="w-3.5 h-3.5" />
               <span>Yüksek ({tierDraft.highGiftMinCoins})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => runStage2Sim('yasin')}
+              className="inline-flex items-center gap-1 bg-[#C9A45C] hover:bg-[#D7B46E] px-2.5 py-1.5 text-xs font-semibold text-[#070D1B] cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Yâsîn ({tierDraft.yasinMinCoins}+)</span>
             </button>
           </div>
         </div>

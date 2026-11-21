@@ -2,6 +2,7 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import {
   createDefaultAppState,
   DEFAULT_MID_OPENING_PRAYERS,
+  DEFAULT_YASIN_RECITATION,
   PRAYER_CATEGORIES,
   SAMPLE_TIKTOK_USERNAMES,
 } from '../data/defaults';
@@ -15,7 +16,10 @@ import {
   saveLocalState,
   subscribeToStudioSync,
 } from '../services/syncClient';
-import { TikTokLiveConnectorService } from '../services/tiktokLiveConnectorService';
+import {
+  normalizeRelayBaseUrl,
+  TikTokLiveConnectorService,
+} from '../services/tiktokLiveConnectorService';
 import {
   classifyFollowInteraction,
   classifyGiftInteraction,
@@ -23,12 +27,16 @@ import {
 } from '../services/interactionClassifier';
 import {
   buildHighTierTurkishSpeech,
+  buildYasinClosingSpeech,
+  buildYasinIntroSpeech,
   executeStage2PlaybackSequence,
+  insertQueueEventPreservingActive,
   normalizeFollowSessionKey,
   pickNonConsecutiveHighDua,
   pickNonConsecutiveMidPrayer,
   pickNonConsecutivePrayerByCategory,
   Stage2PlaybackHandle,
+  stripTurkishMeaningFromSpeech,
 } from '../services/stage2Flow';
 import {
   AvailableVoice,
@@ -55,6 +63,7 @@ import {
   SystemLogEntry,
   TierRuleConfig,
   TikTokConnectionConfig,
+  TikTokRecoveryGapInfo,
   VoiceSettingsConfig,
 } from '../types/nuridua';
 import {
@@ -151,6 +160,22 @@ interface StudioContextValue {
   updateTikTokConfig: (patch: Partial<TikTokConnectionConfig>) => void;
   attemptTikTokConnect: () => Promise<{ ok: boolean; error?: string }>;
   disconnectTikTok: () => void | Promise<void>;
+  recoveryGap: TikTokRecoveryGapInfo | null;
+  dismissRecoveryGap: () => void;
+  simulationStreamActive: boolean;
+  startSimulationSseListener: () => { ok: boolean; error?: string };
+  stopSimulationSseListener: () => void;
+  triggerRelaySimulation: (
+    scenario:
+      | 'follower'
+      | 'small_gift'
+      | 'mid_gift'
+      | 'high_gift'
+      | 'yasin_300'
+      | 'streak'
+      | 'incomplete_streak',
+    opts?: { unitCoins?: number; steps?: number[]; includeRepeatEnd?: boolean }
+  ) => Promise<{ ok: boolean; message: string }>;
   updateBroadcastConfig: (patch: Partial<BroadcastSettingsConfig>) => void;
   addLog: (level: SystemLogEntry['level'], source: SystemLogEntry['source'], message: string) => void;
   resetAllDefaults: () => void;
@@ -158,6 +183,44 @@ interface StudioContextValue {
 }
 
 const StudioContext = createContext<StudioContextValue | null>(null);
+
+const SEEN_FOLLOWS_STORAGE_KEY = 'nur_i_dua_seen_follows_v1';
+const REAL_DEDUPE_STORAGE_KEY = 'nur_i_dua_real_dedupe_v1';
+const PERSISTED_DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function loadPersistedTimestampMap(storageKey: string): Map<string, number> {
+  const map = new Map<string, number>();
+  try {
+    if (typeof localStorage === 'undefined') return map;
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return map;
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    const cutoff = Date.now() - PERSISTED_DEDUPE_TTL_MS;
+    for (const [k, ts] of Object.entries(parsed)) {
+      if (typeof ts === 'number' && ts >= cutoff) {
+        map.set(k, ts);
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return map;
+}
+
+function savePersistedTimestampMap(storageKey: string, map: Map<string, number>, maxEntries = 1000): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const cutoff = Date.now() - PERSISTED_DEDUPE_TTL_MS;
+    const entries: Array<[string, number]> = [];
+    for (const [k, ts] of map.entries()) {
+      if (ts >= cutoff) entries.push([k, ts]);
+    }
+    const trimmed = entries.slice(-maxEntries);
+    localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(trimmed)));
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function dedupeEventsById(events: QueueEvent[]): QueueEvent[] {
   const seen = new Set<string>();
@@ -184,9 +247,57 @@ function recoverInitialState(): AppState {
     ? dedupeEventsById(
         saved.queue
           .filter((item) => item && !historyIds.has(item.id))
-          .map((item) =>
-            item.status === 'speaking' ? { ...item, status: 'pending' as const } : item
-          )
+          .map((item) => {
+            const resetStatus = item.status === 'speaking' ? { ...item, status: 'pending' as const } : item;
+            if (resetStatus.tier === 'yasin_300') {
+              const cleanedRendered = resetStatus.turkishMeaning
+                ? stripTurkishMeaningFromSpeech(resetStatus.renderedPrayer, resetStatus.turkishMeaning)
+                : resetStatus.renderedPrayer;
+              const cleanedIntro = resetStatus.yasinIntroSpeech
+                ? resetStatus.turkishMeaning
+                  ? stripTurkishMeaningFromSpeech(resetStatus.yasinIntroSpeech, resetStatus.turkishMeaning)
+                  : resetStatus.yasinIntroSpeech
+                : undefined;
+              const isDefaultYasin = resetStatus.prayerId === DEFAULT_YASIN_RECITATION.id;
+              return {
+                ...resetStatus,
+                prayerTitle: isDefaultYasin ? DEFAULT_YASIN_RECITATION.title : resetStatus.prayerTitle,
+                sourceCitation: isDefaultYasin ? DEFAULT_YASIN_RECITATION.sourceCitation : resetStatus.sourceCitation,
+                arabicAudioUrl: isDefaultYasin ? DEFAULT_YASIN_RECITATION.audioUrl : resetStatus.arabicAudioUrl,
+                arabicAudioLicense: isDefaultYasin
+                  ? DEFAULT_YASIN_RECITATION.audioLicense
+                  : resetStatus.arabicAudioLicense,
+                arabicAudioAttribution: isDefaultYasin
+                  ? DEFAULT_YASIN_RECITATION.audioAttribution
+                  : resetStatus.arabicAudioAttribution,
+                arabicAudioStatus: isDefaultYasin
+                  ? DEFAULT_YASIN_RECITATION.audioStatus
+                  : resetStatus.arabicAudioStatus,
+                yasinAudioSha256: isDefaultYasin
+                  ? DEFAULT_YASIN_RECITATION.audioSha256
+                  : resetStatus.yasinAudioSha256,
+                turkishMeaning: undefined,
+                renderedPrayer: cleanedRendered,
+                yasinIntroSpeech: cleanedIntro,
+              };
+            }
+            if (resetStatus.tier === 'high_gift' && resetStatus.turkishMeaning) {
+              return {
+                ...resetStatus,
+                renderedPrayer: stripTurkishMeaningFromSpeech(
+                  resetStatus.renderedPrayer,
+                  resetStatus.turkishMeaning
+                ),
+                yasinIntroSpeech: resetStatus.yasinIntroSpeech
+                  ? stripTurkishMeaningFromSpeech(
+                      resetStatus.yasinIntroSpeech,
+                      resetStatus.turkishMeaning
+                    )
+                  : undefined,
+              };
+            }
+            return resetStatus;
+          })
       )
     : [];
 
@@ -202,6 +313,20 @@ function recoverInitialState(): AppState {
       ? saved.highTierDuas
       : defaults.highTierDuas;
 
+  const savedYasin = saved.yasinRecitation;
+  const shouldResetDefaultYasin =
+    !savedYasin ||
+    (savedYasin.id === DEFAULT_YASIN_RECITATION.id &&
+      (savedYasin.audioSha256 !== DEFAULT_YASIN_RECITATION.audioSha256 ||
+        savedYasin.audioStatus !== DEFAULT_YASIN_RECITATION.audioStatus));
+  const mergedYasin = shouldResetDefaultYasin
+    ? { ...DEFAULT_YASIN_RECITATION }
+    : {
+        ...DEFAULT_YASIN_RECITATION,
+        ...savedYasin,
+        turkishMealNotice: '',
+      };
+
   return {
     ...defaults,
     ...saved,
@@ -209,6 +334,7 @@ function recoverInitialState(): AppState {
     gifts: Array.isArray(saved.gifts) && saved.gifts.length > 0 ? saved.gifts : defaults.gifts,
     tierRules: resolveTierRules(saved.tierRules),
     highTierDuas: savedHighTier,
+    yasinRecitation: mergedYasin,
     queue: recoveredQueue,
     history: uniqueHistory,
     scholars: {
@@ -255,6 +381,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   );
   const [lastSpeechError, setLastSpeechError] = useState<string | null>(null);
   const [hasUserGesture, setHasUserGesture] = useState<boolean>(false);
+  const [recoveryGap, setRecoveryGap] = useState<TikTokRecoveryGapInfo | null>(null);
+  const [simulationStreamActive, setSimulationStreamActive] = useState<boolean>(false);
 
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -263,8 +391,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   activeEventRef.current = activeEvent;
 
   const mouthListenersRef = useRef<Set<MouthListener>>(new Set());
-  const recentDedupeRef = useRef<Map<string, number>>(new Map());
-  const seenFollowerKeysRef = useRef<Set<string>>(new Set());
+  const recentDedupeRef = useRef<Map<string, number>>(loadPersistedTimestampMap(REAL_DEDUPE_STORAGE_KEY));
+  const seenFollowerKeysRef = useRef<Set<string>>(
+    new Set(loadPersistedTimestampMap(SEEN_FOLLOWS_STORAGE_KEY).keys())
+  );
+  const seenFollowerTsRef = useRef<Map<string, number>>(loadPersistedTimestampMap(SEEN_FOLLOWS_STORAGE_KEY));
   const lastMidPrayerIdRef = useRef<string | null>(null);
   const lastPrayerIdRef = useRef<string | null>(null);
   const lastHighDuaIdRef = useRef<string | null>(null);
@@ -272,6 +403,21 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const holdTimeoutRef = useRef<number | null>(null);
   const lastBroadcastSyncRef = useRef<number>(0);
   const tiktokConnectorRef = useRef<TikTokLiveConnectorService | null>(null);
+
+  useEffect(() => {
+    const existingEvents = [...stateRef.current.queue, ...stateRef.current.history];
+    for (const ev of existingEvents) {
+      if (ev.eventType === 'follow') {
+        const key = normalizeFollowSessionKey({ userId: ev.userId, username: ev.username });
+        seenFollowerKeysRef.current.add(key);
+      }
+      if (ev.dedupeKey) {
+        if (!recentDedupeRef.current.has(ev.dedupeKey)) {
+          recentDedupeRef.current.set(ev.dedupeKey, Date.parse(ev.createdAt) || Date.now());
+        }
+      }
+    }
+  }, []);
 
   const unlockAudioByGesture = useCallback(() => {
     setHasUserGesture(true);
@@ -700,6 +846,19 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         userId: params.userId,
         username: safeUser,
       });
+      const followDedupeKey = params.externalDedupeKey
+        ? `${params.source}:follow:${params.externalDedupeKey}`
+        : `${params.source}:follow:${sessionFollowKey}`;
+
+      if (params.externalDedupeKey) {
+        const alreadyInQueueOrHistory = [...current.queue, ...current.history].some(
+          (ev) => ev.dedupeKey === followDedupeKey
+        );
+        if (recentDedupeRef.current.has(followDedupeKey) || alreadyInQueueOrHistory) {
+          appendLog('info', 'queue', `Replay/duplicate follow filtered idempotently: @${safeUser}`);
+          return { ok: false, reason: `Bu takip olayı (@${safeUser}) zaten işlendi.` };
+        }
+      }
 
       if (seenFollowerKeysRef.current.has(sessionFollowKey)) {
         appendLog('info', 'queue', `Repeat follower filtered in session: @${safeUser}`);
@@ -715,14 +874,19 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         return { ok: false, reason: 'Takipçi selamlama seviyesi yönetici panelinde devre dışı.' };
       }
 
+      const nowTs = Date.now();
       seenFollowerKeysRef.current.add(sessionFollowKey);
+      seenFollowerTsRef.current.set(sessionFollowKey, nowTs);
+      savePersistedTimestampMap(SEEN_FOLLOWS_STORAGE_KEY, seenFollowerTsRef.current, 1000);
+      if (params.externalDedupeKey) {
+        recentDedupeRef.current.set(followDedupeKey, nowTs);
+        savePersistedTimestampMap(REAL_DEDUPE_STORAGE_KEY, recentDedupeRef.current, 1000);
+      }
 
       const chosenScholar = pickNextScholar(current);
       const followEvent: QueueEvent = {
         id: createUniqueId('flw'),
-        dedupeKey: params.externalDedupeKey
-          ? `${params.source}:follow:${params.externalDedupeKey}`
-          : `${params.source}:follow:${sessionFollowKey}`,
+        dedupeKey: followDedupeKey,
         source: params.source,
         eventType: 'follow',
         tier: 'follower',
@@ -846,23 +1010,23 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         return { ok: false, reason: msg };
       }
 
-      // Stage 3 Yâsîn player is intentionally deferred until Stage 3
-      if (classification.tier === 'yasin_300') {
-        const msg = `[AŞAMA 2] @${safeUser} için ${classification.eventCoins} jetonluk Yâsîn eşiği algılandı; tam Yâsîn-i Şerîf oynatıcısı Aşama 3'te etkinleştirilecektir.`;
-        appendLog('info', 'queue', msg);
-        return { ok: false, reason: msg };
-      }
-
-      // Duplicate protection window (real streams also pass unique streakKey so distinct combos are never dropped)
+      // Duplicate & SSE-replay idempotent protection (covers small, mid, high, and yasin_300 equally)
       const dedupeKey = params.externalDedupeKey
         ? `${params.source}:${params.externalDedupeKey}`
         : `${params.source}:${safeUser.toLowerCase()}:${matchedGift?.id || effectiveGiftName.toLowerCase()}:${qty}:${classification.eventCoins}`;
+      const queuedDedupeKey = `${dedupeKey}:0`;
       const nowMs = Date.now();
       const windowMs = params.externalDedupeKey
-        ? 120_000
+        ? PERSISTED_DEDUPE_TTL_MS
         : Math.max(2, current.tiktok.duplicateWindowSec) * 1000;
       const lastSeen = recentDedupeRef.current.get(dedupeKey);
-      if (lastSeen && nowMs - lastSeen < windowMs) {
+      const alreadyInQueueOrHistory =
+        Boolean(params.externalDedupeKey) &&
+        [...current.queue, ...current.history].some(
+          (ev) => ev.dedupeKey === queuedDedupeKey || ev.dedupeKey === dedupeKey
+        );
+
+      if ((lastSeen && nowMs - lastSeen < windowMs) || alreadyInQueueOrHistory) {
         appendLog(
           'warning',
           'queue',
@@ -874,15 +1038,18 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         };
       }
       recentDedupeRef.current.set(dedupeKey, nowMs);
-      if (recentDedupeRef.current.size > 500) {
-        const cutoff = nowMs - 120_000;
+      if (recentDedupeRef.current.size > 1000) {
+        const cutoff = nowMs - PERSISTED_DEDUPE_TTL_MS;
         for (const [k, ts] of recentDedupeRef.current.entries()) {
           if (ts < cutoff) recentDedupeRef.current.delete(k);
         }
       }
+      if (params.externalDedupeKey) {
+        savePersistedTimestampMap(REAL_DEDUPE_STORAGE_KEY, recentDedupeRef.current, 1000);
+      }
 
-      const chosenScholar = pickNextScholar(current);
       const tier = classification.tier;
+      const chosenScholar = tier === 'yasin_300' ? 'scholar_1' : pickNextScholar(current);
       let category: PrayerCategoryId = matchedGift?.category || 'general_blessings';
       let prayerId = '';
       let prayerTitle = '';
@@ -894,6 +1061,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       let arabicAudioLicense: string | undefined;
       let arabicAudioAttribution: string | undefined;
       let arabicAudioStatus: QueueEvent['arabicAudioStatus'];
+      let yasinIntroSpeech: string | undefined;
+      let yasinAudioSha256: string | undefined;
 
       if (tier === 'small_gift') {
         // 1-49 coins: greeting ONLY, strictly no prayer
@@ -915,8 +1084,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         prayerId = pickedMid.id;
         prayerTitle = pickedMid.title;
         renderedPrayer = renderPersonalizedPrayer(pickedMid.template, safeUser);
-      } else {
-        // 150-299 coins (high_gift): verified Arabic harekeli dua + Qari audio + Turkish meaning & family/parents/relatives dua
+      } else if (tier === 'high_gift') {
+        // 150-299 coins (high_gift): verified Arabic harekeli dua + Qari audio + family/parents/relatives dua
         const pickedHigh = pickNonConsecutiveHighDua(
           current.highTierDuas || [],
           lastHighDuaIdRef.current
@@ -936,7 +1105,28 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         arabicAudioLicense = pickedHigh.audioLicense;
         arabicAudioAttribution = pickedHigh.audioAttribution;
         arabicAudioStatus = pickedHigh.audioStatus;
-        renderedPrayer = buildHighTierTurkishSpeech(pickedHigh, safeUser);
+        yasinAudioSha256 = pickedHigh.audioSha256;
+        renderedPrayer = stripTurkishMeaningFromSpeech(
+          buildHighTierTurkishSpeech(pickedHigh, safeUser),
+          pickedHigh.turkishMeaning
+        );
+      } else {
+        // 300+ coins (yasin_300): single atomic 3-phase Yâsîn-i Şerîf sequence led by Hacı Ahmet Efendi (scholar_1)
+        // Strict rule: NO Turkish meal is ever attached, displayed on screen, or sent to any TTS engine for Yâsîn.
+        const yasinCfg = current.yasinRecitation || DEFAULT_YASIN_RECITATION;
+        category = 'general_blessings';
+        prayerId = yasinCfg.id;
+        prayerTitle = yasinCfg.title || 'Yâsîn-i Şerîf okunuyor';
+        arabicHarekeli = yasinCfg.arabicHarekeliHeader;
+        turkishMeaning = undefined;
+        sourceCitation = yasinCfg.sourceCitation;
+        arabicAudioUrl = yasinCfg.audioUrl;
+        arabicAudioLicense = yasinCfg.audioLicense;
+        arabicAudioAttribution = yasinCfg.audioAttribution;
+        arabicAudioStatus = yasinCfg.audioStatus;
+        yasinAudioSha256 = yasinCfg.audioSha256;
+        yasinIntroSpeech = buildYasinIntroSpeech(yasinCfg, safeUser);
+        renderedPrayer = buildYasinClosingSpeech(yasinCfg, safeUser);
       }
 
       const queuedEvent: QueueEvent = {
@@ -965,24 +1155,16 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         arabicAudioLicense,
         arabicAudioAttribution,
         arabicAudioStatus,
+        yasinIntroSpeech,
+        yasinAudioSha256,
         scholarId: chosenScholar,
         status: 'pending',
         attempts: 0,
         createdAt: new Date().toISOString(),
       };
 
-      const priorityRank: Record<GiftRule['priority'], number> = {
-        urgent: 3,
-        high: 2,
-        normal: 1,
-      };
-
       setState((prev) => {
-        const merged = dedupeEventsById([...prev.queue, queuedEvent]).sort((a, b) => {
-          if (a.status === 'speaking' && b.status !== 'speaking') return -1;
-          if (b.status === 'speaking' && a.status !== 'speaking') return 1;
-          return priorityRank[b.priority] - priorityRank[a.priority];
-        });
+        const merged = insertQueueEventPreservingActive(prev.queue, queuedEvent);
         const next: AppState = {
           ...prev,
           queue: merged,
@@ -1036,9 +1218,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       ...nextPending,
       status: 'speaking',
       playbackPhase:
-        nextPending.tier === 'high_gift' &&
-        nextPending.arabicAudioStatus === 'verified_ready' &&
-        nextPending.arabicAudioUrl
+        nextPending.tier === 'yasin_300'
+          ? 'yasin_intro'
+          : nextPending.tier === 'high_gift' &&
+            nextPending.arabicAudioStatus === 'verified_ready' &&
+            nextPending.arabicAudioUrl
           ? 'arabic_audio'
           : 'turkish_speech',
       attempts: nextPending.attempts + 1,
@@ -1093,7 +1277,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     }
 
     setLastSpeechError(null);
-    const handle = executeStage2PlaybackSequence({
+    let handle: Stage2PlaybackHandle | null = null;
+    let settledSynchronously = false;
+    handle = executeStage2PlaybackSequence({
       event: startedEvent,
       arabicPlayer: verifiedArabicAudioPlayer,
       turkishTts: studioTTSRouter,
@@ -1105,6 +1291,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         neuralVoiceId: chosenNeuralVoiceId,
         tone: voiceCfg.narrationTone,
         fallbackToBrowser: voiceCfg.fallbackToBrowser,
+        forbiddenMealText:
+          startedEvent.tier === 'yasin_300'
+            ? stateRef.current.yasinRecitation?.turkishMealNotice || undefined
+            : startedEvent.turkishMeaning,
         lang: voiceCfg.language || 'tr-TR',
         rate: effectiveRate,
         pitch: prosody.pitch,
@@ -1141,7 +1331,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         }
       },
       onComplete: () => {
-        if (playbackHandleRef.current === handle) {
+        settledSynchronously = true;
+        if (!handle || playbackHandleRef.current === handle) {
           playbackHandleRef.current = null;
         }
         emitMouthLevel(0);
@@ -1185,7 +1376,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         }, holdMs);
       },
       onError: (reason) => {
-        if (playbackHandleRef.current === handle) {
+        settledSynchronously = true;
+        if (!handle || playbackHandleRef.current === handle) {
           playbackHandleRef.current = null;
         }
         emitMouthLevel(0);
@@ -1219,7 +1411,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         });
       },
     });
-    playbackHandleRef.current = handle;
+    if (!settledSynchronously && handle.isLocked()) {
+      playbackHandleRef.current = handle;
+    } else if (playbackHandleRef.current === handle) {
+      playbackHandleRef.current = null;
+    }
   }, [state.queue, state.queuePaused, activeEvent, isBroadcastView, hasUserGesture, emitMouthLevel, appendLog]);
 
   const toggleQueuePause = useCallback(() => {
@@ -1555,12 +1751,15 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     [appendLog, emitMouthLevel]
   );
 
-  // Persistent TikTokLiveConnectorService lifecycle (Admin view only)
-  useEffect(() => {
-    if (isBroadcastView) return;
-
-    const connector = new TikTokLiveConnectorService(stateRef.current.tiktok, {
-      onStatusChange: (payload) => {
+  const createConnectorCallbacks = useCallback(
+    () => ({
+      onStatusChange: (payload: {
+        state: TikTokConnectionConfig['connectionState'];
+        roomId?: string | null;
+        viewerCount?: number | null;
+        error?: string | null;
+        updatedAt: string;
+      }) => {
         setState((prev) => {
           const nextRoomId = payload.roomId !== undefined ? payload.roomId : prev.tiktok.roomId;
           const nextViewerCount =
@@ -1587,9 +1786,26 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           };
         });
       },
-      onFinalizedGift: (gift) => {
+      onRecoveryGap: (gap: TikTokRecoveryGapInfo) => {
+        setRecoveryGap(gap);
+      },
+      onFinalizedGift: (gift: {
+        isSimulated?: boolean;
+        username: string;
+        userId?: string;
+        giftName: string;
+        giftId: string;
+        quantity: number;
+        unitCoins?: number;
+        diamondCount?: number;
+        repeatCount?: number;
+        giftType?: number;
+        repeatEnd?: boolean;
+        streakKey: string;
+        sseEventId?: string;
+      }) => {
         enqueueGiftEvent({
-          source: 'real',
+          source: gift.isSimulated ? 'simulation' : 'real',
           username: gift.username,
           userId: gift.userId,
           giftIdOrName: gift.giftName || gift.giftId,
@@ -1599,21 +1815,39 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           repeatCount: gift.repeatCount ?? gift.quantity,
           giftType: gift.giftType,
           repeatEnd: gift.repeatEnd,
-          externalDedupeKey: gift.streakKey,
+          externalDedupeKey: gift.streakKey || gift.sseEventId,
         });
       },
-      onFollowEvent: (follow) => {
+      onFollowEvent: (follow: {
+        isSimulated?: boolean;
+        username?: string;
+        nickname?: string;
+        userId?: string;
+        dedupeKey?: string;
+        eventId: string;
+      }) => {
         enqueueFollowEvent({
-          source: 'real',
+          source: follow.isSimulated ? 'simulation' : 'real',
           username: follow.username || follow.nickname,
           userId: follow.userId,
           externalDedupeKey: follow.dedupeKey || follow.eventId,
         });
       },
-      onLog: (level, message) => {
+      onLog: (level: 'info' | 'warning' | 'error', message: string) => {
         appendLog(level, 'tiktok', message);
       },
-    });
+    }),
+    [enqueueGiftEvent, enqueueFollowEvent, appendLog]
+  );
+
+  // Persistent TikTokLiveConnectorService lifecycle (Admin view only)
+  useEffect(() => {
+    if (isBroadcastView) return;
+
+    const connector = new TikTokLiveConnectorService(
+      stateRef.current.tiktok,
+      createConnectorCallbacks()
+    );
 
     tiktokConnectorRef.current = connector;
     return () => {
@@ -1622,7 +1856,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         tiktokConnectorRef.current = null;
       }
     };
-  }, [isBroadcastView, enqueueGiftEvent, enqueueFollowEvent, appendLog]);
+  }, [isBroadcastView, createConnectorCallbacks]);
 
   useEffect(() => {
     if (isBroadcastView) return;
@@ -1672,48 +1906,26 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
 
   const attemptTikTokConnect = useCallback(async () => {
     const tk = stateRef.current.tiktok;
+    const callbacks = createConnectorCallbacks();
     const connector =
-      tiktokConnectorRef.current ||
-      new TikTokLiveConnectorService(tk, {
-        onFinalizedGift: (gift) => {
-          enqueueGiftEvent({
-            source: 'real',
-            username: gift.username,
-            userId: gift.userId,
-            giftIdOrName: gift.giftName || gift.giftId,
-            displayGiftName: gift.giftName,
-            quantity: gift.quantity,
-            unitCoins: gift.unitCoins ?? gift.diamondCount,
-            repeatCount: gift.repeatCount ?? gift.quantity,
-            giftType: gift.giftType,
-            repeatEnd: gift.repeatEnd,
-            externalDedupeKey: gift.streakKey,
-          });
-        },
-        onFollowEvent: (follow) => {
-          enqueueFollowEvent({
-            source: 'real',
-            username: follow.username || follow.nickname,
-            userId: follow.userId,
-            externalDedupeKey: follow.dedupeKey || follow.eventId,
-          });
-        },
-        onLog: (level, message) => appendLog(level, 'tiktok', message),
-      });
+      tiktokConnectorRef.current || new TikTokLiveConnectorService(tk, callbacks);
 
+    connector.updateCallbacks(callbacks);
     if (!tiktokConnectorRef.current) {
       tiktokConnectorRef.current = connector;
     }
 
+    setSimulationStreamActive(false);
     connector.updateConfig(tk);
     const result = await connector.connect(tk.username);
     if (!result.ok && result.error) {
       appendLog('warning', 'tiktok', result.error);
     }
     return result;
-  }, [appendLog, enqueueGiftEvent, enqueueFollowEvent]);
+  }, [appendLog, createConnectorCallbacks]);
 
   const disconnectTikTok = useCallback(async () => {
+    setSimulationStreamActive(false);
     const connector = tiktokConnectorRef.current;
     if (connector) {
       await connector.disconnect();
@@ -1731,6 +1943,111 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     }
     appendLog('info', 'tiktok', 'TikTok LIVE connector disconnected.');
   }, [appendLog]);
+
+  const dismissRecoveryGap = useCallback(() => {
+    setRecoveryGap(null);
+  }, []);
+
+  const startSimulationSseListener = useCallback(() => {
+    const tk = stateRef.current.tiktok;
+    const callbacks = createConnectorCallbacks();
+    const connector =
+      tiktokConnectorRef.current || new TikTokLiveConnectorService(tk, callbacks);
+    connector.updateCallbacks(callbacks);
+    connector.updateConfig(tk);
+    if (!tiktokConnectorRef.current) {
+      tiktokConnectorRef.current = connector;
+    }
+    const res = connector.connectSimulationStream(tk.username);
+    setSimulationStreamActive(res.ok);
+    return res;
+  }, [createConnectorCallbacks]);
+
+  const stopSimulationSseListener = useCallback(() => {
+    tiktokConnectorRef.current?.stopSimulationStream();
+    setSimulationStreamActive(false);
+    appendLog('info', 'tiktok', 'Simülasyon SSE test akışı durduruldu.');
+  }, [appendLog]);
+
+  const triggerRelaySimulation = useCallback(
+    async (
+      scenario:
+        | 'follower'
+        | 'small_gift'
+        | 'mid_gift'
+        | 'high_gift'
+        | 'yasin_300'
+        | 'streak'
+        | 'incomplete_streak',
+      opts?: { unitCoins?: number; steps?: number[]; includeRepeatEnd?: boolean }
+    ): Promise<{ ok: boolean; message: string }> => {
+      const tk = stateRef.current.tiktok;
+      const baseUrl = normalizeRelayBaseUrl(tk.connectorEndpoint);
+      if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) {
+        return {
+          ok: false,
+          message: 'Önce geçerli bir Relay Sunucusu URL adresi girin.',
+        };
+      }
+
+      if (
+        !tiktokConnectorRef.current?.isSimulationStreamActive &&
+        tk.connectionState !== 'connected'
+      ) {
+        startSimulationSseListener();
+      }
+
+      try {
+        const response = await fetch(`${baseUrl}/simulate`, {
+          method: 'POST',
+          mode: 'cors',
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            username: sanitizeTikTokHandle(tk.username) || 'fcproplayer7',
+            scenario,
+            ...opts,
+          }),
+        });
+        const data = (await response.json().catch(() => ({}))) as {
+          ok?: boolean;
+          emittedCount?: number;
+          bufferedCount?: number;
+          error?: string;
+        };
+
+        if (response.status === 404) {
+          return {
+            ok: false,
+            message:
+              'Relay sunucusunda /simulate kapalı (HTTP 404 — Production güvenliği aktif). Test için relay sunucusunu SIMULATION_ENABLED=true ile başlatın.',
+          };
+        }
+        if (!response.ok || !data.ok) {
+          return {
+            ok: false,
+            message: data.error || `Simülasyon isteği başarısız oldu (HTTP ${response.status}).`,
+          };
+        }
+        return {
+          ok: true,
+          message: `Relay SSE simülasyonu gönderildi (${scenario}: ${data.emittedCount ?? 0} yayınlandı, ${data.bufferedCount ?? 0} ara seri tamponlandı).`,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          message:
+            err instanceof Error
+              ? `Relay simülasyon isteği başarısız: ${err.message}`
+              : 'Relay simülasyon isteği başarısız.',
+        };
+      }
+    },
+    [startSimulationSseListener]
+  );
 
   const updateBroadcastConfig = useCallback((patch: Partial<BroadcastSettingsConfig>) => {
     setState((prev) => ({
@@ -1761,9 +2078,22 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         const uniqueQueue = Array.isArray(parsed.queue)
           ? dedupeEventsById(parsed.queue).filter((q) => !historyIds.has(q.id))
           : [];
+        const importedYasin = parsed.yasinRecitation;
+        const shouldResetImportedYasin =
+          !importedYasin ||
+          (importedYasin.id === DEFAULT_YASIN_RECITATION.id &&
+            (importedYasin.audioSha256 !== DEFAULT_YASIN_RECITATION.audioSha256 ||
+              importedYasin.audioStatus !== DEFAULT_YASIN_RECITATION.audioStatus));
         setState({
           ...defaults,
           ...parsed,
+          yasinRecitation: shouldResetImportedYasin
+            ? { ...DEFAULT_YASIN_RECITATION }
+            : {
+                ...DEFAULT_YASIN_RECITATION,
+                ...importedYasin,
+                turkishMealNotice: '',
+              },
           queue: uniqueQueue,
           history: uniqueHistory,
           tiktok: {
@@ -1830,6 +2160,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       updateTikTokConfig,
       attemptTikTokConnect,
       disconnectTikTok,
+      recoveryGap,
+      dismissRecoveryGap,
+      simulationStreamActive,
+      startSimulationSseListener,
+      stopSimulationSseListener,
+      triggerRelaySimulation,
       updateBroadcastConfig,
       addLog: appendLog,
       resetAllDefaults,
@@ -1882,6 +2218,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       updateTikTokConfig,
       attemptTikTokConnect,
       disconnectTikTok,
+      recoveryGap,
+      dismissRecoveryGap,
+      simulationStreamActive,
+      startSimulationSseListener,
+      stopSimulationSseListener,
+      triggerRelaySimulation,
       updateBroadcastConfig,
       appendLog,
       resetAllDefaults,

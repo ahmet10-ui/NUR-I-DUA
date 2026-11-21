@@ -182,11 +182,14 @@ export function createRelayServer(options = {}) {
   const connectionFactory =
     options.connectionFactory ||
     (async (username) => {
-      const { WebcastPushConnection } = await import('tiktok-live-connector');
-      return new WebcastPushConnection(username, {
-        processInitialData: false,
-        enableExtendedGiftInfo: true,
-      });
+      const { TikTokLiveConnection } = await import('tiktok-live-connector');
+return new TikTokLiveConnection(username, {
+  processInitialData: false,
+  enableExtendedGiftInfo: true,
+  ...(process.env.SIGN_API_KEY
+    ? { signApiKey: process.env.SIGN_API_KEY }
+    : {}),
+});
     });
 
   /**
@@ -625,26 +628,58 @@ export function createRelayServer(options = {}) {
     }
     session.connection = connection;
 
-    connection.on('gift', (data) => {
-      handleRawTikTokGift(session, data);
-    });
+    connection.on('gift', (event) => {
+  const user = event?.user || {};
+  const gift = event?.gift || {};
 
-    connection.on('follow', (data) => {
-      handleRawTikTokFollow(session, data, 'follow');
-    });
+  handleRawTikTokGift(session, {
+    ...event,
+    userId: user.id,
+    uniqueId: user.displayId,
+    nickname: user.nickname,
+    giftId: event?.giftId ?? gift.id,
+    giftName: gift.name ?? event?.extendedGiftInfo?.name,
+    giftType: gift.type,
+    diamondCount: gift.diamondCount,
+    repeatCount: event?.repeatCount,
+    repeatEnd: event?.repeatEnd === 1 || event?.repeatEnd === true,
+    groupId: event?.groupId,
+    msgId: event?.common?.msgId,
+    extendedGiftInfo: event?.extendedGiftInfo,
+  });
+});
 
-    connection.on('social', (data) => {
-      if (isSocialFollowEvent(data)) {
-        handleRawTikTokFollow(session, data, 'social');
-      }
-    });
+    connection.on('follow', (event) => {
+  const user = event?.user || {};
+  handleRawTikTokFollow(session, {
+    ...event,
+    userId: user.id,
+    uniqueId: user.displayId,
+    nickname: user.nickname,
+    msgId: event?.common?.msgId,
+  }, 'follow');
+});
 
-    connection.on('roomUser', (data) => {
-      if (typeof data?.viewerCount === 'number') {
-        session.viewerCount = data.viewerCount;
-        broadcastStatus(session);
-      }
-    });
+connection.on('social', (event) => {
+  if (isSocialFollowEvent(event)) {
+    const user = event?.user || {};
+    handleRawTikTokFollow(session, {
+      ...event,
+      userId: user.id,
+      uniqueId: user.displayId,
+      nickname: user.nickname,
+      msgId: event?.common?.msgId,
+    }, 'social');
+  }
+});
+
+connection.on('roomUser', (event) => {
+  const viewerCount = Number(event?.total ?? event?.totalUser);
+  if (Number.isFinite(viewerCount) && viewerCount >= 0) {
+    session.viewerCount = viewerCount;
+    broadcastStatus(session);
+  }
+});
 
     connection.on('streamEnd', () => {
       clearPendingStreaks(session);
@@ -675,10 +710,13 @@ export function createRelayServer(options = {}) {
 
     try {
       const roomState = await connection.connect();
-      session.state = 'connected';
-      session.roomId = roomState?.roomId ? String(roomState.roomId) : null;
-      session.viewerCount =
-        typeof roomState?.roomInfo?.user_count === 'number' ? roomState.roomInfo.user_count : null;
+      session.state = 'connected';session.roomId = roomState?.roomId ? String(roomState.roomId) : null;
+const initialViewerCount = Number(
+  roomState?.roomInfo?.user_count ?? roomState?.roomInfo?.userCount
+);
+session.viewerCount = Number.isFinite(initialViewerCount)
+  ? initialViewerCount
+  : null;
       session.lastError = null;
       broadcastStatus(session);
       return {

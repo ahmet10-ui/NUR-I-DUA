@@ -87,6 +87,7 @@ interface StudioContextValue {
   state: AppState;
   activeEvent: QueueEvent | null;
   speakingState: 'idle' | 'speaking' | 'holding';
+  playbackStarted: boolean;
   isSpeechPaused: boolean;
   availableVoices: AvailableVoice[];
   voiceLoadStatus: 'loading' | 'ready' | 'empty' | 'unsupported';
@@ -345,7 +346,24 @@ function recoverInitialState(): AppState {
         scholar_2: { ...defaults.scholars.profiles.scholar_2, ...(saved.scholars?.profiles?.scholar_2 || {}) },
       },
     },
-    voice: { ...defaults.voice, ...(saved.voice || {}) },
+    voice: {
+      ...defaults.voice,
+      ...(saved.voice || {}),
+      scholar1Engine:
+        saved.voice?.scholar1Engine === 'ema_lightning' ? 'ema_lightning' : 'seslen_hasan',
+      emaLightningRate:
+        typeof saved.voice?.emaLightningRate === 'number'
+          ? saved.voice.emaLightningRate
+          : defaults.voice.emaLightningRate,
+      emaLightningFallbackToHasan:
+        typeof saved.voice?.emaLightningFallbackToHasan === 'boolean'
+          ? saved.voice.emaLightningFallbackToHasan
+          : defaults.voice.emaLightningFallbackToHasan,
+      emaLightningApproved:
+        typeof saved.voice?.emaLightningApproved === 'boolean'
+          ? saved.voice.emaLightningApproved
+          : defaults.voice.emaLightningApproved,
+    },
     tiktok: {
       ...defaults.tiktok,
       ...(saved.tiktok || {}),
@@ -368,6 +386,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const [state, setState] = useState<AppState>(() => recoverInitialState());
   const [activeEvent, setActiveEvent] = useState<QueueEvent | null>(null);
   const [speakingState, setSpeakingState] = useState<'idle' | 'speaking' | 'holding'>('idle');
+  const [playbackStarted, setPlaybackStarted] = useState<boolean>(false);
   const [isSpeechPaused, setIsSpeechPaused] = useState(false);
   const [availableVoices, setAvailableVoices] = useState<AvailableVoice[]>(() => getAvailableSpeechVoices());
   const [voiceLoadStatus, setVoiceLoadStatus] = useState<'loading' | 'ready' | 'empty' | 'unsupported'>(() => {
@@ -389,6 +408,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
 
   const activeEventRef = useRef<QueueEvent | null>(activeEvent);
   activeEventRef.current = activeEvent;
+
+  const playbackStartedRef = useRef<boolean>(playbackStarted);
+  playbackStartedRef.current = playbackStarted;
 
   const mouthListenersRef = useRef<Set<MouthListener>>(new Set());
   const recentDedupeRef = useRef<Map<string, number>>(loadPersistedTimestampMap(REAL_DEDUPE_STORAGE_KEY));
@@ -536,6 +558,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       if (isBroadcastView && res.livePlayback) {
         setActiveEvent(res.livePlayback.activeEvent);
         setSpeakingState(res.livePlayback.speakingState);
+        setPlaybackStarted(Boolean(res.livePlayback.playbackStarted));
       }
     });
 
@@ -550,6 +573,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         if (!mounted || !isBroadcastView) return;
         setActiveEvent(payload.activeEvent);
         setSpeakingState(payload.speakingState);
+        setPlaybackStarted(Boolean(payload.playbackStarted));
         emitMouthLevel(payload.mouthLevel || 0);
       },
     });
@@ -1229,6 +1253,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       startedAt: new Date().toISOString(),
     };
 
+    playbackStartedRef.current = false;
+    setPlaybackStarted(false);
     setActiveEvent(startedEvent);
     setSpeakingState('speaking');
     setIsSpeechPaused(false);
@@ -1247,6 +1273,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       speakingState: 'speaking',
       activeScholar: startedEvent.scholarId,
       mouthLevel: 0.4,
+      playbackStarted: false,
     });
 
     const voiceCfg = stateRef.current.voice;
@@ -1261,9 +1288,13 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       pitch: voiceCfg.scholar1Pitch,
     });
     const isAndroidNative = isNativeAndroidEnvironment();
+    const chosenScholar1Engine =
+      voiceCfg.scholar1Engine === 'ema_lightning' ? 'ema_lightning' : 'seslen_hasan';
     const effectiveRate =
       startedEvent.scholarId === 'scholar_1' && isAndroidNative
-        ? voiceCfg.seslenHasanRate ?? 0.94
+        ? chosenScholar1Engine === 'ema_lightning'
+          ? voiceCfg.emaLightningRate ?? 1.0
+          : voiceCfg.seslenHasanRate ?? 0.94
         : prosody.rate;
 
     if (isAndroidNative) {
@@ -1271,7 +1302,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         'info',
         'tts',
         startedEvent.scholarId === 'scholar_1'
-          ? 'Dua kuyruğu motor yönlendirmesi: Hacı Ahmet Efendi (scholar_1) -> Seslen-TTS Hasan (Yerel ONNX)'
+          ? chosenScholar1Engine === 'ema_lightning'
+            ? `Dua kuyruğu motor yönlendirmesi: Hacı Ahmet Efendi (scholar_1) -> EMA Lightning (Yerel ONNX 48 kHz${
+                voiceCfg.emaLightningFallbackToHasan !== false ? ' · pre-start Hasan fallback açık' : ''
+              })`
+            : 'Dua kuyruğu motor yönlendirmesi: Hacı Ahmet Efendi (scholar_1) -> Seslen-TTS Hasan (Yerel ONNX)'
           : 'Dua kuyruğu motor yönlendirmesi: Hacı Mehmet Efendi (scholar_2) -> Antalia-2 Mini (Android Sistem TTS)'
       );
     }
@@ -1279,12 +1314,17 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     setLastSpeechError(null);
     let handle: Stage2PlaybackHandle | null = null;
     let settledSynchronously = false;
+    let outcomeSettled = false;
+    let currentPhase: QueueEvent['playbackPhase'] = startedEvent.playbackPhase;
     handle = executeStage2PlaybackSequence({
       event: startedEvent,
       arabicPlayer: verifiedArabicAudioPlayer,
       turkishTts: studioTTSRouter,
+      arabicStartTimeoutMs: startedEvent.tier === 'yasin_300' ? 20000 : 12000,
       ttsOptions: {
         scholarId: startedEvent.scholarId,
+        scholar1Engine: startedEvent.scholarId === 'scholar_1' ? chosenScholar1Engine : undefined,
+        emaFallbackToHasan: voiceCfg.emaLightningFallbackToHasan,
         preferredEngine: voiceCfg.provider,
         voiceURI: chosenVoiceURI,
         neuralProviderId: voiceCfg.neuralProviderId,
@@ -1301,6 +1341,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         volume: voiceCfg.volume,
       },
       onPhaseChange: (phase) => {
+        currentPhase = phase;
         setActiveEvent((prev) =>
           prev && prev.id === startedEvent.id ? { ...prev, playbackPhase: phase } : prev
         );
@@ -1309,10 +1350,20 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           speakingState: 'speaking',
           activeScholar: startedEvent.scholarId,
           mouthLevel: 0.25,
+          playbackStarted: playbackStartedRef.current,
         });
       },
       onStart: () => {
+        playbackStartedRef.current = true;
+        setPlaybackStarted(true);
         setSpeakingState('speaking');
+        pushLivePlayback({
+          activeEvent: activeEventRef.current || startedEvent,
+          speakingState: 'speaking',
+          activeScholar: startedEvent.scholarId,
+          mouthLevel: 0.35,
+          playbackStarted: true,
+        });
       },
       onFallbackNotice: (reason) => {
         appendLog('warning', 'tts', reason);
@@ -1327,21 +1378,27 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
             speakingState: 'speaking',
             activeScholar: startedEvent.scholarId,
             mouthLevel: level,
+            playbackStarted: playbackStartedRef.current,
           });
         }
       },
       onComplete: () => {
+        if (outcomeSettled) return;
+        outcomeSettled = true;
         settledSynchronously = true;
         if (!handle || playbackHandleRef.current === handle) {
           playbackHandleRef.current = null;
         }
         emitMouthLevel(0);
+        playbackStartedRef.current = false;
+        setPlaybackStarted(false);
         setSpeakingState('holding');
         pushLivePlayback({
           activeEvent: activeEventRef.current || startedEvent,
           speakingState: 'holding',
           activeScholar: startedEvent.scholarId,
           mouthLevel: 0,
+          playbackStarted: false,
         });
 
         if (holdTimeoutRef.current !== null) {
@@ -1367,25 +1424,37 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           }));
           setActiveEvent(null);
           setSpeakingState('idle');
+          setPlaybackStarted(false);
+          playbackStartedRef.current = false;
           pushLivePlayback({
             activeEvent: null,
             speakingState: 'idle',
             activeScholar: startedEvent.scholarId,
             mouthLevel: 0,
+            playbackStarted: false,
           });
         }, holdMs);
       },
       onError: (reason) => {
+        if (outcomeSettled) return;
+        outcomeSettled = true;
         settledSynchronously = true;
         if (!handle || playbackHandleRef.current === handle) {
           playbackHandleRef.current = null;
         }
         emitMouthLevel(0);
-        setLastSpeechError(reason);
+        playbackStartedRef.current = false;
+        setPlaybackStarted(false);
+        const phaseTaggedReason =
+          startedEvent.tier === 'yasin_300' && currentPhase
+            ? `[Faz: ${currentPhase}] ${reason}`
+            : reason;
+        setLastSpeechError(phaseTaggedReason);
         const failedEvent: QueueEvent = {
           ...startedEvent,
+          playbackPhase: currentPhase,
           status: 'failed',
-          errorMessage: reason,
+          errorMessage: phaseTaggedReason,
         };
         setState((prev) => ({
           ...prev,
@@ -1396,7 +1465,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
               timestamp: new Date().toISOString(),
               level: 'error' as const,
               source: 'tts' as const,
-              message: `Playback error for ${startedEvent.displayUsername}: ${reason}`,
+              message: `Playback error for ${startedEvent.displayUsername}: ${phaseTaggedReason}`,
             },
             ...prev.logs,
           ].slice(0, 120),
@@ -1408,6 +1477,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           speakingState: 'idle',
           activeScholar: startedEvent.scholarId,
           mouthLevel: 0,
+          playbackStarted: false,
         });
       },
     });
@@ -1474,6 +1544,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         history: dedupeEventsById([cancelled, ...prev.history]).slice(0, 200),
       }));
     }
+    playbackStartedRef.current = false;
+    setPlaybackStarted(false);
     setActiveEvent(null);
     setSpeakingState('idle');
     pushLivePlayback({
@@ -1481,6 +1553,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       speakingState: 'idle',
       activeScholar: stateRef.current.scholars.currentSpeaker,
       mouthLevel: 0,
+      playbackStarted: false,
     });
   }, [emitMouthLevel]);
 
@@ -1597,9 +1670,13 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         pitch: voiceCfg.scholar1Pitch,
       });
 
+      const chosenScholar1Engine =
+        voiceCfg.scholar1Engine === 'ema_lightning' ? 'ema_lightning' : 'seslen_hasan';
       const effectiveRate =
         scholarId === 'scholar_1' && isNativeAndroidEnvironment()
-          ? voiceCfg.seslenHasanRate ?? 0.94
+          ? chosenScholar1Engine === 'ema_lightning'
+            ? voiceCfg.emaLightningRate ?? 1.0
+            : voiceCfg.seslenHasanRate ?? 0.94
           : prosody.rate;
 
       setLastSpeechError(null);
@@ -1610,6 +1687,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       setSpeakingState('speaking');
       studioTTSRouter.speak(sampleText, {
         scholarId,
+        scholar1Engine: scholarId === 'scholar_1' ? chosenScholar1Engine : undefined,
+        emaFallbackToHasan: voiceCfg.emaLightningFallbackToHasan,
         preferredEngine: voiceCfg.provider,
         voiceURI: chosenVoiceURI,
         neuralProviderId: voiceCfg.neuralProviderId,
@@ -2117,6 +2196,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       state,
       activeEvent,
       speakingState,
+      playbackStarted,
       isSpeechPaused,
       availableVoices,
       voiceLoadStatus,
@@ -2175,6 +2255,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       state,
       activeEvent,
       speakingState,
+      playbackStarted,
       isSpeechPaused,
       availableVoices,
       voiceLoadStatus,

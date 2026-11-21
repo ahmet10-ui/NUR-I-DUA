@@ -8,6 +8,7 @@ export interface LivePlaybackPayload {
   speakingState: 'idle' | 'speaking' | 'holding';
   activeScholar: ScholarId;
   mouthLevel: number;
+  playbackStarted?: boolean;
 }
 
 export function loadLocalState(): AppState | null {

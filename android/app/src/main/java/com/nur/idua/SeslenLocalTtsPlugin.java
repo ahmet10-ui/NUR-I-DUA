@@ -3,12 +3,14 @@ package com.nur.idua;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.os.Build;
 import android.os.Debug;
 import android.util.Log;
 
@@ -181,6 +183,11 @@ public class SeslenLocalTtsPlugin extends Plugin {
 
     private AudioTrack activeAudioTrack = null;
     private final Object audioLock = new Object();
+    private AudioManager audioManager = null;
+    private AudioFocusRequest activeAudioFocusRequest = null;
+    private final AudioManager.OnAudioFocusChangeListener speechFocusChangeListener = focusChange -> {
+        // Transient speech playback yields cleanly if caller stops/pauses externally
+    };
 
     private final List<String> recentLogs = new ArrayList<>();
     private final Object logLock = new Object();
@@ -188,8 +195,50 @@ public class SeslenLocalTtsPlugin extends Plugin {
     @Override
     public void load() {
         super.load();
+        audioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
         if (allFilesPresentWithExpectedSize(getModelDir())) {
             scheduleBackgroundWarmUp("startup");
+        }
+    }
+
+    private void requestSpeechAudioFocus() {
+        if (audioManager == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                AudioAttributes attrs = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build();
+                AudioFocusRequest req = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(attrs)
+                    .setAcceptsDelayedFocusGain(false)
+                    .setOnAudioFocusChangeListener(speechFocusChangeListener)
+                    .build();
+                activeAudioFocusRequest = req;
+                audioManager.requestAudioFocus(req);
+            } else {
+                @SuppressWarnings("deprecation")
+                int ignored = audioManager.requestAudioFocus(
+                    speechFocusChangeListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+                );
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void abandonSpeechAudioFocus() {
+        if (audioManager == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activeAudioFocusRequest != null) {
+                audioManager.abandonAudioFocusRequest(activeAudioFocusRequest);
+                activeAudioFocusRequest = null;
+            } else {
+                @SuppressWarnings("deprecation")
+                int ignored = audioManager.abandonAudioFocus(speechFocusChangeListener);
+            }
+        } catch (Exception ignored) {
         }
     }
 
@@ -1641,6 +1690,14 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 AudioTrack.MODE_STREAM,
                 AudioManager.AUDIO_SESSION_ID_GENERATE
             );
+            if (track.getState() != AudioTrack.STATE_INITIALIZED) {
+                try {
+                    track.release();
+                } catch (Exception ignored) {
+                }
+                throw new RuntimeException("Seslen AudioTrack başlatılamadı (state=" + track.getState() + ").");
+            }
+            requestSpeechAudioFocus();
             track.setVolume(volume);
             synchronized (audioLock) {
                 activeAudioTrack = track;
@@ -1693,7 +1750,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
                     emitMouthLevel(Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8)), utteranceId);
                     int written = track.write(pcm, offset, count);
                     if (written < 0) {
-                        break;
+                        throw new RuntimeException("Seslen AudioTrack write hatası (code=" + written + ").");
                     }
                     offset += count;
                 }
@@ -2091,8 +2148,23 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 AudioTrack.MODE_STATIC,
                 AudioManager.AUDIO_SESSION_ID_GENERATE
             );
+            if (track.getState() != AudioTrack.STATE_INITIALIZED) {
+                try {
+                    track.release();
+                } catch (Exception ignored) {
+                }
+                throw new RuntimeException("Seslen MODE_STATIC AudioTrack başlatılamadı (state=" + track.getState() + ").");
+            }
             int written = track.write(pcmBytes, 0, totalBytes);
             addLog("AudioTrack MODE_STATIC (" + label + "): 24000Hz, mono, PCM_16BIT, written=" + written + "/" + totalBytes + " bytes");
+            if (written <= 0) {
+                try {
+                    track.release();
+                } catch (Exception ignored) {
+                }
+                throw new RuntimeException("Seslen MODE_STATIC AudioTrack write hatası (written=" + written + ").");
+            }
+            requestSpeechAudioFocus();
             track.setVolume(volume);
             synchronized (audioLock) {
                 activeAudioTrack = track;
@@ -2170,6 +2242,14 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 AudioTrack.MODE_STREAM,
                 AudioManager.AUDIO_SESSION_ID_GENERATE
             );
+            if (track.getState() != AudioTrack.STATE_INITIALIZED) {
+                try {
+                    track.release();
+                } catch (Exception ignored) {
+                }
+                throw new RuntimeException("Seslen MODE_STREAM AudioTrack başlatılamadı (state=" + track.getState() + ").");
+            }
+            requestSpeechAudioFocus();
             track.setVolume(volume);
             synchronized (audioLock) {
                 activeAudioTrack = track;
@@ -2215,7 +2295,10 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 }
                 double rms = Math.sqrt(sumSq / Math.max(1, count));
                 emitMouthLevel(Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8)), utteranceId);
-                track.write(pcm16, offset, count);
+                int written = track.write(pcm16, offset, count);
+                if (written < 0) {
+                    throw new RuntimeException("Seslen MODE_STREAM AudioTrack write hatası (code=" + written + ").");
+                }
                 offset += count;
             }
             releaseTrackAfterCompletion();
@@ -2237,6 +2320,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 activeAudioTrack = null;
             }
         }
+        abandonSpeechAudioFocus();
     }
 
     private void stopAudioTrackImmediate() {
@@ -2255,6 +2339,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 activeAudioTrack = null;
             }
         }
+        abandonSpeechAudioFocus();
     }
 
     private static void closeTensorQuietly(OnnxTensor t) {

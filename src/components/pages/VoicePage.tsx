@@ -42,6 +42,24 @@ import {
   verifySeslenContract,
   verifySeslenModelIntegrity,
 } from '../../services/nativeSeslenTtsBridge';
+import {
+  cancelEmaDownload,
+  downloadEmaModel,
+  EmaContractVerificationResult,
+  EmaSpeakTestResult,
+  EmaStatusResult,
+  getEmaStatus,
+  replayLastEmaWav,
+  speakEmaTest,
+  stopEmaTest,
+  subscribeEmaEvents,
+  verifyEmaContract,
+  verifyEmaModelIntegrity,
+} from '../../services/nativeEmaTtsBridge';
+import {
+  EMA_BENCHMARK_PRESETS,
+  EMA_LIGHTNING_MODEL_METADATA,
+} from '../../services/emaTextFrontend';
 import { NeuralTTSProviderId, ScholarId, TTSProviderType } from '../../types/nuridua';
 
 interface RawVoiceDiagnosticItem {
@@ -127,17 +145,40 @@ export const VoicePage: React.FC = () => {
   const [seslenOfficialStats, setSeslenOfficialStats] = useState<SeslenPcmStats | null>(null);
   const [seslenLogs, setSeslenLogs] = useState<string[]>([]);
 
+  // EMA Lightning (8.6M, 48 kHz mono, Apache-2.0) candidate & A/B benchmark state
+  const [emaStatus, setEmaStatus] = useState<EmaStatusResult | null>(null);
+  const [emaProgress, setEmaProgress] = useState<SeslenDownloadProgressEvent | null>(null);
+  const [emaError, setEmaError] = useState<string | null>(null);
+  const [emaIntegrity, setEmaIntegrity] = useState<SeslenIntegrityResult | null>(null);
+  const [emaIntegrityLoading, setEmaIntegrityLoading] = useState(false);
+  const [emaContract, setEmaContract] = useState<EmaContractVerificationResult | null>(null);
+  const [emaContractLoading, setEmaContractLoading] = useState(false);
+  const [selectedBenchmarkId, setSelectedBenchmarkId] = useState<string>(EMA_BENCHMARK_PRESETS[0].id);
+  const [abCompareText, setAbCompareText] = useState<string>(EMA_BENCHMARK_PRESETS[0].text);
+  const [emaSpeaking, setEmaSpeaking] = useState(false);
+  const [emaMouthLevel, setEmaMouthLevel] = useState(0);
+  const [emaTestResult, setEmaTestResult] = useState<EmaSpeakTestResult | null>(null);
+  const [abHasanResult, setAbHasanResult] = useState<SeslenSpeakTestResult | null>(null);
+  const [abRunningSequence, setAbRunningSequence] = useState<boolean>(false);
+  const [emaLogs, setEmaLogs] = useState<string[]>([]);
+  const emaRate = voice.emaLightningRate ?? 1.0;
+
   const loadNativeAndroidStatus = useCallback(async () => {
     setNativeLoading(true);
     try {
-      const [info, seslen] = await Promise.all([
+      const [info, seslen, ema] = await Promise.all([
         getNativeAndroidEngineInfo(),
         getSeslenStatus(),
+        getEmaStatus(),
       ]);
       setNativeStatus(info);
       setSeslenStatus(seslen);
       if (seslen.logs && seslen.logs.length > 0) {
         setSeslenLogs(seslen.logs);
+      }
+      setEmaStatus(ema);
+      if (ema.logs && ema.logs.length > 0) {
+        setEmaLogs(ema.logs);
       }
     } finally {
       setNativeLoading(false);
@@ -291,6 +332,172 @@ export const VoicePage: React.FC = () => {
     await stopSeslenTest();
     setSeslenSpeaking(false);
     setSeslenMouthLevel(0);
+  };
+
+  useEffect(() => {
+    let unsub: (() => void) | null = null;
+    void subscribeEmaEvents({
+      onDownloadProgress: (ev) => {
+        setEmaProgress(ev);
+        setEmaError(null);
+      },
+      onDownloadError: (ev) => {
+        setEmaError(ev.message);
+        void getEmaStatus().then(setEmaStatus);
+      },
+      onStart: () => {
+        setEmaSpeaking(true);
+      },
+      onMouth: (ev) => {
+        setEmaMouthLevel(ev.level);
+      },
+      onLog: (ev) => {
+        setEmaLogs((prev) => [...prev.slice(-79), ev.line]);
+      },
+      onDone: (ev) => {
+        setEmaSpeaking(false);
+        setEmaMouthLevel(0);
+        setEmaTestResult(ev);
+        if (ev.logs) setEmaLogs(ev.logs);
+      },
+      onError: (ev) => {
+        setEmaSpeaking(false);
+        setEmaMouthLevel(0);
+        setEmaError(ev.message);
+      },
+    }).then((fn) => {
+      unsub = fn;
+    });
+    return () => {
+      unsub?.();
+    };
+  }, []);
+
+  const handleStartEmaDownload = async () => {
+    setEmaError(null);
+    setEmaIntegrity(null);
+    const res = await downloadEmaModel();
+    if (!res.ok && res.error) {
+      setEmaError(res.error);
+    }
+    const updated = await getEmaStatus();
+    setEmaStatus(updated);
+    if (updated.logs) setEmaLogs(updated.logs);
+  };
+
+  const handleVerifyEmaIntegrity = async () => {
+    setEmaIntegrityLoading(true);
+    setEmaError(null);
+    try {
+      const res = await verifyEmaModelIntegrity();
+      setEmaIntegrity(res);
+      if (res.logs) setEmaLogs(res.logs);
+      if (!res.ok && res.error) {
+        setEmaError(res.error);
+      }
+    } finally {
+      setEmaIntegrityLoading(false);
+    }
+  };
+
+  const handleVerifyEmaContract = async () => {
+    setEmaContractLoading(true);
+    setEmaError(null);
+    try {
+      const res = await verifyEmaContract(abCompareText);
+      setEmaContract(res);
+      if (res.logs) setEmaLogs(res.logs);
+      if (!res.ok && res.error) {
+        setEmaError(res.error);
+      }
+      const updated = await getEmaStatus();
+      setEmaStatus(updated);
+    } finally {
+      setEmaContractLoading(false);
+    }
+  };
+
+  const handleRunAbHasan = async () => {
+    setSeslenError(null);
+    setAbHasanResult(null);
+    setSeslenSpeaking(true);
+    try {
+      const res = await speakSeslenTest({
+        text: abCompareText,
+        rate: seslenRate,
+        volume: voice.volume,
+      });
+      setAbHasanResult(res);
+      setSeslenTestResult(res);
+      if (res.logs) setSeslenLogs(res.logs);
+      if (!res.ok && res.error && !res.cancelled) {
+        setSeslenError(res.error);
+      }
+      const updated = await getSeslenStatus();
+      setSeslenStatus(updated);
+    } finally {
+      setSeslenSpeaking(false);
+      setSeslenMouthLevel(0);
+    }
+  };
+
+  const handleRunAbEma = async () => {
+    setEmaError(null);
+    setEmaTestResult(null);
+    setEmaSpeaking(true);
+    try {
+      const res = await speakEmaTest({
+        text: abCompareText,
+        rate: emaRate,
+        seed: 0,
+        volume: voice.volume,
+      });
+      setEmaTestResult(res);
+      if (res.logs) setEmaLogs(res.logs);
+      if (!res.ok && res.error && !res.cancelled) {
+        setEmaError(res.error);
+      }
+      const updated = await getEmaStatus();
+      setEmaStatus(updated);
+    } finally {
+      setEmaSpeaking(false);
+      setEmaMouthLevel(0);
+    }
+  };
+
+  const handleRunSequentialAbComparison = async () => {
+    setAbRunningSequence(true);
+    try {
+      await handleRunAbHasan();
+      await handleRunAbEma();
+    } finally {
+      setAbRunningSequence(false);
+    }
+  };
+
+  const handleReplayLastEmaWav = async () => {
+    setEmaError(null);
+    setEmaSpeaking(true);
+    try {
+      const res = await replayLastEmaWav(voice.volume);
+      if (res.logs) setEmaLogs(res.logs);
+      if (!res.ok && res.error) {
+        setEmaError(res.error);
+      }
+    } finally {
+      setEmaSpeaking(false);
+      setEmaMouthLevel(0);
+    }
+  };
+
+  const handleStopEmaTest = async () => {
+    await stopEmaTest();
+    await stopSeslenTest();
+    setEmaSpeaking(false);
+    setSeslenSpeaking(false);
+    setEmaMouthLevel(0);
+    setSeslenMouthLevel(0);
+    setAbRunningSequence(false);
   };
 
   const inspectBrowserVoices = useCallback(
@@ -1436,6 +1643,458 @@ export const VoicePage: React.FC = () => {
             </div>
           </details>
         </div>
+      </div>
+
+      {/* Temporary A/B Comparison & Redmi Note 10T 5G Benchmark Panel (Seslen Hasan vs EMA Lightning) */}
+      <div className="bg-[#0B142B] border border-[#C9A45C]/65 p-5 space-y-5">
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 border-b border-[#16254A] pb-4">
+          <div>
+            <p className="text-[11px] uppercase tracking-[0.14em] text-[#D4B26A]">
+              Geçici A/B Onay &amp; Performans Karşılaştırma Paneli (Hacı Ahmet Efendi · scholar_1)
+            </p>
+            <h2 className="mt-0.5 text-lg font-semibold text-white">
+              Seslen-TTS Hasan vs EMA Lightning ({EMA_LIGHTNING_MODEL_METADATA.parameterCount} · 48 kHz Mono · {EMA_LIGHTNING_MODEL_METADATA.license})
+            </h2>
+            <p className="mt-1 text-xs text-slate-300 leading-relaxed">
+              Redmi Note 10T 5G cihazında gerçek sentez süresi, ilk ses gecikmesi (TTFA), RTF ve bellek kullanımını yan yana ölçmek için hazırlanmıştır.{' '}
+              <strong className="text-[#E5C88B]">
+                Kullanıcı onayı verilene kadar varsayılan motor Seslen-TTS Hasan olarak kalır; Hacı Mehmet Efendi&apos;nin Antalia-2 Mini sesi hiçbir koşulda değiştirilmez.
+              </strong>
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <span
+              className={`text-[11px] font-mono px-2.5 py-1 border ${
+                emaStatus?.modelInstalled
+                  ? 'border-emerald-500/50 bg-emerald-950/35 text-emerald-300'
+                  : 'border-amber-500/40 bg-amber-950/30 text-amber-200'
+              }`}
+            >
+              {emaStatus?.modelInstalled ? 'EMA Modeli Hazır (33.3 MiB)' : 'EMA Modeli Kurulmadı'}
+            </span>
+            <span
+              className={`text-[11px] font-mono px-2.5 py-1 border ${
+                voice.emaLightningApproved
+                  ? 'border-emerald-500/50 bg-emerald-950/35 text-emerald-200'
+                  : 'border-[#233969] bg-[#070E1F] text-slate-300'
+              }`}
+            >
+              {voice.emaLightningApproved ? 'Kullanıcı Onayı: Verildi' : 'Kullanıcı Onayı: Bekleniyor'}
+            </span>
+          </div>
+        </div>
+
+        {/* Engine Selection & Approval Controls for Hacı Ahmet Efendi */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
+          <div className="bg-[#070E1F] border border-[#1B2D58] p-4 space-y-3">
+            <p className="font-semibold text-white">1. Hacı Ahmet Efendi Motor Seçimi (Kuyruk &amp; Yâsîn)</p>
+            <div className="space-y-2">
+              <label className="flex items-start gap-2.5 p-2.5 border border-[#1B2D58] bg-[#0B142B] cursor-pointer">
+                <input
+                  type="radio"
+                  name="scholar1-engine"
+                  checked={(voice.scholar1Engine ?? 'seslen_hasan') === 'seslen_hasan'}
+                  onChange={() => updateVoiceConfig({ scholar1Engine: 'seslen_hasan' })}
+                  className="mt-0.5 accent-[#C9A45C]"
+                />
+                <span>
+                  <strong className="text-white block">Seslen-TTS Hasan (Mevcut Varsayılan)</strong>
+                  <span className="text-slate-400">24 kHz mono · yaşlı erkek bariton karakteri korunur.</span>
+                </span>
+              </label>
+
+              <label className="flex items-start gap-2.5 p-2.5 border border-[#1B2D58] bg-[#0B142B] cursor-pointer">
+                <input
+                  type="radio"
+                  name="scholar1-engine"
+                  checked={voice.scholar1Engine === 'ema_lightning'}
+                  onChange={() => updateVoiceConfig({ scholar1Engine: 'ema_lightning' })}
+                  className="mt-0.5 accent-[#C9A45C]"
+                />
+                <span>
+                  <strong className="text-[#E5C88B] block">EMA Lightning (Aday · Yerel ONNX 48 kHz)</strong>
+                  <span className="text-slate-400">8.6M parametre · hızlı sentez · streaming 48 kHz mono.</span>
+                </span>
+              </label>
+            </div>
+
+            <div>
+              <div className="flex justify-between text-[11px] mb-1">
+                <span className="text-slate-300">EMA Okuma Hızı</span>
+                <span className="font-mono-tabular text-[#E5C88B]">{emaRate.toFixed(2)}×</span>
+              </div>
+              <input
+                type="range"
+                min={0.78}
+                max={1.25}
+                step={0.02}
+                value={emaRate}
+                onChange={(e) => updateVoiceConfig({ emaLightningRate: Number(e.target.value) })}
+                className="w-full accent-[#C9A45C]"
+              />
+            </div>
+
+            <label className="flex items-start gap-2 text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={voice.emaLightningFallbackToHasan !== false}
+                onChange={(e) =>
+                  updateVoiceConfig({ emaLightningFallbackToHasan: e.target.checked })
+                }
+                className="mt-0.5 accent-[#C9A45C]"
+              />
+              <span>
+                EMA ses başlatmadan hata verirse kuyrukta otomatik olarak Seslen-TTS Hasan&apos;a geri düş (Antalia&apos;ya asla geçilmez).
+              </span>
+            </label>
+
+            <div className="pt-2 border-t border-[#16254A] flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  updateVoiceConfig({
+                    emaLightningApproved: !voice.emaLightningApproved,
+                    scholar1Engine: !voice.emaLightningApproved ? 'ema_lightning' : 'seslen_hasan',
+                  })
+                }
+                className={`px-3 py-1.5 font-semibold border cursor-pointer ${
+                  voice.emaLightningApproved
+                    ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-200'
+                    : 'bg-[#13234B] border-[#C9A45C]/60 text-[#F4E3BD]'
+                }`}
+              >
+                {voice.emaLightningApproved
+                  ? 'Onayı Kaldır & Hasan Varsayılanına Dön'
+                  : 'Cihaz Testi Başarılı — EMA Lightning\'i Onayla'}
+              </button>
+            </div>
+          </div>
+
+          {/* EMA Model Download / Verify / Contract */}
+          <div className="bg-[#070E1F] border border-[#1B2D58] p-4 space-y-3">
+            <p className="font-semibold text-white">2. EMA Lightning ONNX Dosyaları &amp; Bütünlük</p>
+            <p className="text-slate-400 leading-relaxed">
+              Kaynak: <code className="font-mono text-slate-200">ozcancelik/ema-lightning-onnx</code> (<code className="font-mono text-slate-200">meta.json</code>, <code className="font-mono text-slate-200">text.onnx</code>, <code className="font-mono text-slate-200">sound.onnx</code>, <code className="font-mono text-slate-200">decoder.onnx</code> · 33.3 MiB). PyTorch gerekmez.
+            </p>
+
+            {!emaStatus?.isNativeAndroid || !emaStatus?.pluginAvailable ? (
+              <div className="p-2.5 border border-amber-500/40 bg-[#0B142B] text-amber-200">
+                Web/Chrome önizlemesindesiniz. Gerçek ONNX indirme ve Redmi Note 10T 5G ölçümü Android APK içinde aktif olur.
+              </div>
+            ) : (
+              <>
+                <p className="text-slate-400">
+                  Wi-Fi:{' '}
+                  <strong className={emaStatus.wifiConnected ? 'text-emerald-300' : 'text-amber-300'}>
+                    {emaStatus.wifiConnected ? 'Bağlı' : 'Bağlı Değil (Wi-Fi Gerekli)'}
+                  </strong>
+                  {' · '}Oturum: {emaStatus.sessionsLoaded ? 'Önbellekte Hazır' : 'İlk Sentezde Yüklenecek'}
+                </p>
+
+                <div className="flex flex-wrap gap-2">
+                  {!emaStatus.modelInstalled && !emaStatus.isDownloading && (
+                    <button
+                      type="button"
+                      onClick={() => void handleStartEmaDownload()}
+                      className="bg-[#C9A45C] hover:bg-[#D7B46E] text-[#070D1B] font-semibold px-3 py-1.5 cursor-pointer"
+                    >
+                      {emaError ? 'Tekrar Dene (Wi-Fi)' : 'Wi-Fi ile EMA Modelini İndir'}
+                    </button>
+                  )}
+                  {emaStatus.isDownloading && (
+                    <button
+                      type="button"
+                      onClick={() => void cancelEmaDownload()}
+                      className="bg-[#2B1822] border border-rose-500/40 text-rose-200 px-3 py-1.5 cursor-pointer"
+                    >
+                      İptal Et
+                    </button>
+                  )}
+                  {emaStatus.modelInstalled && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={emaIntegrityLoading}
+                        onClick={() => void handleVerifyEmaIntegrity()}
+                        className="bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-[#E5C88B] px-3 py-1.5 cursor-pointer disabled:opacity-60"
+                      >
+                        {emaIntegrityLoading ? 'Kontrol Ediliyor...' : 'SHA-256 Doğrula'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={emaContractLoading}
+                        onClick={() => void handleVerifyEmaContract()}
+                        className="bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-white px-3 py-1.5 cursor-pointer disabled:opacity-60"
+                      >
+                        {emaContractLoading ? 'Doğrulanıyor...' : 'ONNX Kontratını Doğrula'}
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {(emaStatus.isDownloading || (emaProgress && emaProgress.percent < 100)) && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[11px] text-slate-300">
+                      <span>
+                        {emaProgress?.phase === 'verifying' ? 'SHA-256 Doğrulanıyor' : 'İndiriliyor'}:{' '}
+                        <code className="font-mono text-white">{emaProgress?.currentFile || '...'}</code>
+                      </span>
+                      <span className="font-mono-tabular text-[#E5C88B]">
+                        {emaProgress?.percent ?? emaStatus.percent}% ({((emaProgress?.downloadedBytes ?? emaStatus.downloadedBytes) / (1024 * 1024)).toFixed(1)} / 33.3 MB)
+                      </span>
+                    </div>
+                    <div className="w-full h-2 bg-[#0B142B] border border-[#1B2D58]">
+                      <div
+                        className="h-full bg-[#C9A45C] transition-all"
+                        style={{ width: `${emaProgress?.percent ?? emaStatus.percent}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {emaIntegrity && (
+                  <div
+                    className={`p-2 border ${
+                      emaIntegrity.ok
+                        ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                        : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
+                    }`}
+                  >
+                    {emaIntegrity.ok
+                      ? `Tüm ${emaIntegrity.files.length} EMA dosyasının boyut ve SHA-256 özeti doğrulandı.`
+                      : emaIntegrity.error || 'EMA bütünlük doğrulaması başarısız.'}
+                  </div>
+                )}
+
+                {emaContract && (
+                  <div
+                    className={`p-2 border space-y-1 ${
+                      emaContract.ok
+                        ? 'bg-emerald-950/25 border-emerald-500/40 text-emerald-200'
+                        : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
+                    }`}
+                  >
+                    {emaContract.ok ? (
+                      <>
+                        <p>
+                          Parça: <code className="font-mono text-white">{emaContract.chunkCount}</code> · Token L:{' '}
+                          <code className="font-mono text-white">{emaContract.tokenLengthL}</code> · 48 kHz
+                        </p>
+                        <p className="text-slate-300 break-words">
+                          Normalize: <code className="font-mono text-white">{emaContract.normalizedText}</code>
+                        </p>
+                      </>
+                    ) : (
+                      <p>{emaContract.error}</p>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+
+            {emaError && (
+              <div className="p-2.5 border border-rose-500/45 bg-rose-950/35 text-rose-200">
+                <strong className="text-white">EMA Lightning Hatası:</strong> {emaError}
+              </div>
+            )}
+          </div>
+
+          {/* 5 Benchmark Presets + Execution Buttons */}
+          <div className="bg-[#070E1F] border border-[#1B2D58] p-4 space-y-3">
+            <p className="font-semibold text-white">3. Redmi Note 10T 5G Benchmark Senaryoları</p>
+            <div className="space-y-1.5">
+              {EMA_BENCHMARK_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedBenchmarkId(preset.id);
+                    setAbCompareText(preset.text);
+                  }}
+                  className={`w-full text-left px-2.5 py-1.5 border text-[11px] cursor-pointer ${
+                    selectedBenchmarkId === preset.id
+                      ? 'border-[#C9A45C] bg-[#13234B] text-[#F4E3BD]'
+                      : 'border-[#1B2D58] bg-[#0B142B] text-slate-300 hover:border-[#2C4786]'
+                  }`}
+                >
+                  <span className="font-semibold block">{preset.label}</span>
+                  <span className="text-slate-400">{preset.targetDescription}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Editable Benchmark Text + Action Buttons */}
+        <div className="bg-[#070E1F] border border-[#1B2D58] p-4 space-y-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label htmlFor="ab-benchmark-text" className="font-semibold text-white">
+              Karşılaştırma Metni ({abCompareText.length} karakter)
+            </label>
+            <span className="text-slate-400">
+              Not: Yâsîn-i Şerîf kapanışında ve kısa/orta/yüksek hediyelerde seçili Hacı Ahmet motoru aynı metinlerle kullanılır.
+            </span>
+          </div>
+          <textarea
+            id="ab-benchmark-text"
+            rows={3}
+            value={abCompareText}
+            onChange={(e) => setAbCompareText(e.target.value)}
+            className="w-full bg-[#0B142B] border border-[#233969] px-3 py-2 text-xs text-white focus:outline-none focus:border-[#C9A45C]"
+          />
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={!seslenStatus?.modelInstalled || seslenSpeaking || emaSpeaking || abRunningSequence}
+              onClick={() => void handleRunAbHasan()}
+              className="inline-flex items-center gap-1.5 bg-[#13234B] hover:bg-[#1B3166] border border-[#29437F] text-white font-medium px-3.5 py-2 cursor-pointer disabled:opacity-50"
+            >
+              <Volume2 className="w-3.5 h-3.5 text-[#E5C88B]" />
+              <span>{seslenSpeaking ? 'Hasan Çalınıyor...' : 'Hasan ile Sentezle & Çal'}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={!emaStatus?.modelInstalled || emaSpeaking || seslenSpeaking || abRunningSequence}
+              onClick={() => void handleRunAbEma()}
+              className="inline-flex items-center gap-1.5 bg-[#C9A45C] hover:bg-[#D7B46E] text-[#070D1B] font-semibold px-3.5 py-2 cursor-pointer disabled:opacity-50"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              <span>{emaSpeaking ? 'EMA Çalınıyor...' : 'EMA Lightning ile Sentezle & Çal'}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={
+                !seslenStatus?.modelInstalled ||
+                !emaStatus?.modelInstalled ||
+                seslenSpeaking ||
+                emaSpeaking ||
+                abRunningSequence
+              }
+              onClick={() => void handleRunSequentialAbComparison()}
+              className="inline-flex items-center gap-1.5 bg-[#13234B] hover:bg-[#1B3166] border border-[#C9A45C]/60 text-[#F4E3BD] font-semibold px-3.5 py-2 cursor-pointer disabled:opacity-50"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>{abRunningSequence ? 'Sıralı A/B Ölçülüyor...' : 'Sıralı A/B Testi (Önce Hasan → Sonra EMA)'}</span>
+            </button>
+
+            {emaStatus?.hasLastTestWav && !emaSpeaking && (
+              <button
+                type="button"
+                onClick={() => void handleReplayLastEmaWav()}
+                className="inline-flex items-center gap-1.5 bg-[#0B142B] border border-[#29437F] text-slate-200 px-3 py-2 cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>Son EMA WAV&apos;ı Çal</span>
+              </button>
+            )}
+
+            {(seslenSpeaking || emaSpeaking || abRunningSequence) && (
+              <button
+                type="button"
+                onClick={() => void handleStopEmaTest()}
+                className="inline-flex items-center gap-1.5 bg-[#2B1822] border border-rose-500/40 text-rose-200 px-3 py-2 cursor-pointer"
+              >
+                <Square className="w-3.5 h-3.5" />
+                <span>Durdur</span>
+              </button>
+            )}
+          </div>
+
+          {emaSpeaking && (
+            <div className="space-y-1">
+              <div className="flex justify-between text-[11px] text-slate-400">
+                <span>EMA Canlı PCM Ağız Senkron Seviyesi (48 kHz RMS)</span>
+                <span className="font-mono-tabular text-slate-200">{Math.round(emaMouthLevel * 100)}%</span>
+              </div>
+              <div className="w-full h-1.5 bg-[#0B142B] border border-[#1B2D58]">
+                <div
+                  className="h-full bg-[#C9A45C] transition-all"
+                  style={{ width: `${Math.round(emaMouthLevel * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Honest Real-Measurement Side-by-Side Comparison Table */}
+        <div className="overflow-x-auto border border-[#1B2D58] bg-[#070E1F]">
+          <table className="w-full text-left border-collapse text-xs">
+            <thead>
+              <tr className="bg-[#0B142B] border-b border-[#1B2D58] text-slate-400 uppercase text-[11px]">
+                <th className="py-2.5 px-3">Gerçek Cihaz Ölçüm Metriği</th>
+                <th className="py-2.5 px-3">Seslen-TTS Hasan (Mevcut · 24 kHz)</th>
+                <th className="py-2.5 px-3 text-[#E5C88B]">EMA Lightning (Aday · 48 kHz)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#142347] font-mono-tabular text-slate-200">
+              <tr>
+                <td className="py-2 px-3 text-slate-300 font-sans">Model Yükleme Süresi</td>
+                <td className="py-2 px-3">{abHasanResult?.ok ? `${abHasanResult.modelLoadMs ?? 0} ms` : 'Ölçüm bekleniyor'}</td>
+                <td className="py-2 px-3">{emaTestResult?.ok ? `${emaTestResult.modelLoadMs ?? 0} ms` : 'Ölçüm bekleniyor'}</td>
+              </tr>
+              <tr>
+                <td className="py-2 px-3 text-slate-300 font-sans">İlk Ses Gecikmesi (Time to First Audio)</td>
+                <td className="py-2 px-3">{abHasanResult?.ok ? `${abHasanResult.timeToFirstAudioMs ?? '—'} ms` : 'Ölçüm bekleniyor'}</td>
+                <td className="py-2 px-3">{emaTestResult?.ok ? `${emaTestResult.timeToFirstAudioMs ?? emaTestResult.firstAudioMs ?? '—'} ms` : 'Ölçüm bekleniyor'}</td>
+              </tr>
+              <tr>
+                <td className="py-2 px-3 text-slate-300 font-sans">Toplam Sentez Süresi / Ses Süresi</td>
+                <td className="py-2 px-3">
+                  {abHasanResult?.ok ? `${abHasanResult.synthesisMs ?? 0} ms / ${abHasanResult.audioDurationMs ?? 0} ms` : 'Ölçüm bekleniyor'}
+                </td>
+                <td className="py-2 px-3">
+                  {emaTestResult?.ok ? `${emaTestResult.synthesisMs ?? 0} ms / ${emaTestResult.audioDurationMs ?? 0} ms` : 'Ölçüm bekleniyor'}
+                </td>
+              </tr>
+              <tr>
+                <td className="py-2 px-3 text-slate-300 font-sans">Real-Time Factor (RTF)</td>
+                <td className="py-2 px-3">{abHasanResult?.ok ? String(abHasanResult.rtf ?? '—') : 'Ölçüm bekleniyor'}</td>
+                <td className="py-2 px-3">{emaTestResult?.ok ? String(emaTestResult.rtf ?? emaTestResult.realTimeFactor ?? '—') : 'Ölçüm bekleniyor'}</td>
+              </tr>
+              <tr>
+                <td className="py-2 px-3 text-slate-300 font-sans">Streaming / Parça / Pencere</td>
+                <td className="py-2 px-3">
+                  {abHasanResult?.ok
+                    ? `${abHasanResult.streamingUsed ? 'Evet' : 'Hayır'} · ${abHasanResult.chunkCount ?? 1} parça`
+                    : 'Ölçüm bekleniyor'}
+                </td>
+                <td className="py-2 px-3">
+                  {emaTestResult?.ok
+                    ? `${emaTestResult.streamingUsed ? 'Evet' : 'Hayır'} · ${emaTestResult.chunkCount ?? 1} parça / ${emaTestResult.windowCount ?? 1} pencere`
+                    : 'Ölçüm bekleniyor'}
+                </td>
+              </tr>
+              <tr>
+                <td className="py-2 px-3 text-slate-300 font-sans">Native Heap / Boş Sistem RAM</td>
+                <td className="py-2 px-3">
+                  {abHasanResult?.memory
+                    ? `${abHasanResult.memory.nativeHeapMb} MB / ${abHasanResult.memory.systemAvailMb ?? '—'} MB`
+                    : 'Ölçüm bekleniyor'}
+                </td>
+                <td className="py-2 px-3">
+                  {emaTestResult?.memory
+                    ? `${emaTestResult.memory.nativeHeapMb} MB / ${emaTestResult.memory.systemAvailMb ?? '—'} MB`
+                    : 'Ölçüm bekleniyor'}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {emaLogs.length > 0 && (
+          <div className="bg-[#070E1F] border border-[#1B2D58] p-3 space-y-1.5 text-xs">
+            <p className="font-semibold text-white">EMA Lightning Canlı Cihaz Logları</p>
+            <div className="max-h-36 overflow-y-auto font-mono text-[10px] text-slate-300 space-y-0.5">
+              {emaLogs.map((line, idx) => (
+                <div key={`elog-${idx}`}>{line}</div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Android Native TextToSpeech (Capacitor) Diagnostic Panel */}

@@ -193,6 +193,7 @@ export interface Stage2PlaybackParams {
   arabicPlayer: ArabicClipAdapter;
   turkishTts: TurkishTtsAdapter;
   ttsOptions: Omit<TTSSpeakOptions, 'onStart' | 'onMouthLevel' | 'onEnd' | 'onError'>;
+  arabicStartTimeoutMs?: number;
   onPhaseChange?: (phase: 'yasin_intro' | 'arabic_audio' | 'turkish_speech') => void;
   onStart?: () => void;
   onMouthLevel?: (level: number) => void;
@@ -205,9 +206,10 @@ export interface Stage2PlaybackParams {
  * Orchestrates Stage 2 & Stage 3 event playback with strict audio-isolation lock:
  * - For `yasin_300` (300+ coins): runs an atomic 3-phase sequence on Hacı Ahmet Efendi (`scholar_1`):
  *   1) `yasin_intro`: Hacı Ahmet Efendi opening takdim speech
- *   2) `arabic_audio`: Full verified Yâsîn-i Şerîf Qari audio recording
+ *   2) `arabic_audio`: Full verified Yâsîn-i Şerîf Qari audio recording (strictly requires verified playback start)
  *   3) `turkish_speech`: Hacı Ahmet Efendi long closing thank-you & ithaf prayer
- *   If Yâsîn audio is missing, unverified, or corrupt, fails cleanly without pretending Yâsîn played and releases lock.
+ *   If Yâsîn audio is missing, unverified, stalls on start, fires a premature end without starting,
+ *   or fails during playback, emits `onError` cleanly without pretending Yâsîn completed.
  * - For `high_gift` (150-299 coins): plays verified Arabic Qari audio FIRST (when verified_ready),
  *   then routes ONLY the personalized family/parents/relatives dua (NEVER Arabic, NEVER Turkish meal)
  *   to the scholar's isolated TTS engine.
@@ -219,6 +221,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
     arabicPlayer,
     turkishTts,
     ttsOptions,
+    arabicStartTimeoutMs = 20000,
     onPhaseChange,
     onStart,
     onMouthLevel,
@@ -234,6 +237,20 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
     event.tier === 'yasin_300' ? 'yasin_intro' : 'turkish_speech';
   let startNotified = false;
 
+  // Monotonic phase completion & start-verification flags (CRITICAL for Yâsîn-i Şerîf integrity)
+  let introSettled = false;
+  let arabicStarted = false;
+  let arabicSettled = false;
+  let turkishSettled = false;
+  let arabicStartWatchdog: ReturnType<typeof setTimeout> | null = null;
+
+  const clearArabicWatchdog = () => {
+    if (arabicStartWatchdog !== null) {
+      clearTimeout(arabicStartWatchdog);
+      arabicStartWatchdog = null;
+    }
+  };
+
   const notifyStartOnce = () => {
     if (!startNotified && !cancelled && !completed) {
       startNotified = true;
@@ -243,6 +260,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
 
   const finishSuccess = () => {
     if (cancelled || completed) return;
+    clearArabicWatchdog();
     completed = true;
     locked = false;
     phase = 'done';
@@ -252,6 +270,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
 
   const finishError = (reason: string) => {
     if (cancelled || completed) return;
+    clearArabicWatchdog();
     completed = true;
     locked = false;
     phase = 'done';
@@ -271,6 +290,10 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
 
   const startTurkishPhase = (forcedScholarId?: ScholarId) => {
     if (cancelled || completed) return;
+    if (event.tier === 'yasin_300' && (!arabicStarted || !arabicSettled)) {
+      finishError('Yâsîn-i Şerîf Arapça tilaveti doğrulanıp tamamlanmadan kapanış duasına geçilemez.');
+      return;
+    }
     phase = 'turkish_speech';
     onPhaseChange?.('turkish_speech');
 
@@ -295,9 +318,13 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
         if (!cancelled && !completed) onFallbackNotice?.(reason);
       },
       onEnd: () => {
+        if (cancelled || completed || turkishSettled) return;
+        turkishSettled = true;
         finishSuccess();
       },
       onError: (reason) => {
+        if (cancelled || completed || turkishSettled) return;
+        turkishSettled = true;
         finishError(reason);
       },
     });
@@ -331,26 +358,64 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
 
     const safeIntro = buildSafeTurkish(event.yasinIntroSpeech || '');
     const startYasinAudioPhase = () => {
-      if (cancelled || completed) return;
+      if (cancelled || completed || arabicSettled) return;
       phase = 'arabic_audio';
+      arabicStarted = false;
+      arabicSettled = false;
       onPhaseChange?.('arabic_audio');
+
+      if (arabicStartTimeoutMs > 0) {
+        clearArabicWatchdog();
+        arabicStartWatchdog = setTimeout(() => {
+          arabicStartWatchdog = null;
+          if (!cancelled && !completed && !arabicStarted && !arabicSettled) {
+            arabicSettled = true;
+            try {
+              arabicPlayer.stop();
+            } catch {
+              // ignore
+            }
+            finishError('Yâsîn-i Şerîf kârî kaydı beklenen sürede başlatılamadı (playback-start zaman aşımı).');
+          }
+        }, arabicStartTimeoutMs);
+      }
+
       arabicPlayer.play(audioUrl, {
         volume: ttsOptions.volume,
         expectedSha256: event.yasinAudioSha256,
         onStart: () => {
+          if (cancelled || completed || arabicSettled) return;
+          arabicStarted = true;
+          clearArabicWatchdog();
           notifyStartOnce();
         },
         onMouthLevel: (lvl) => {
           if (!cancelled && !completed) onMouthLevel?.(lvl);
         },
         onEnd: () => {
-          if (cancelled || completed) return;
+          if (cancelled || completed || arabicSettled) return;
+          clearArabicWatchdog();
+          if (!arabicStarted) {
+            arabicSettled = true;
+            try {
+              arabicPlayer.stop();
+            } catch {
+              // ignore
+            }
+            finishError(
+              'Yâsîn-i Şerîf kârî kaydı başlamadan erken tamamlandı (playback-start doğrulanamadı); tamamlandı olarak işaretlenmedi.'
+            );
+            return;
+          }
+          arabicSettled = true;
           onMouthLevel?.(0);
           // Phase 3: Hacı Ahmet Efendi long closing thank-you & ithaf prayer
           startTurkishPhase('scholar_1');
         },
         onError: (reason) => {
-          if (cancelled || completed) return;
+          if (cancelled || completed || arabicSettled) return;
+          arabicSettled = true;
+          clearArabicWatchdog();
           finishError(
             `Yâsîn-i Şerîf kârî ses dosyası çalınamadı (${reason}). Desteklenen biçimler: ${YASIN_ACCEPTED_AUDIO_FORMATS.join(', ')}.`
           );
@@ -359,7 +424,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
     };
 
     if (safeIntro) {
-      // Phase 1: Hacı Ahmet Efendi (scholar_1 -> Seslen-TTS Hasan) Yâsîn takdim konuşması
+      // Phase 1: Hacı Ahmet Efendi (scholar_1) Yâsîn takdim konuşması
       phase = 'yasin_intro';
       onPhaseChange?.('yasin_intro');
       turkishTts.speak(safeIntro, {
@@ -376,15 +441,19 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
           if (!cancelled && !completed) onFallbackNotice?.(reason);
         },
         onEnd: () => {
-          if (cancelled || completed) return;
+          if (cancelled || completed || introSettled) return;
+          introSettled = true;
           onMouthLevel?.(0);
           startYasinAudioPhase();
         },
         onError: (reason) => {
+          if (cancelled || completed || introSettled) return;
+          introSettled = true;
           finishError(`Yâsîn takdim konuşması hatası: ${reason}`);
         },
       });
     } else {
+      introSettled = true;
       startYasinAudioPhase();
     }
   } else {
@@ -395,24 +464,29 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
     if (shouldPlayArabicFirst) {
       if (event.arabicAudioStatus === 'verified_ready' && event.arabicAudioUrl?.trim()) {
         phase = 'arabic_audio';
+        arabicStarted = false;
+        arabicSettled = false;
         onPhaseChange?.('arabic_audio');
         arabicPlayer.play(event.arabicAudioUrl.trim(), {
           volume: ttsOptions.volume,
           expectedSha256: event.yasinAudioSha256,
           onStart: () => {
+            if (cancelled || completed || arabicSettled) return;
+            arabicStarted = true;
             notifyStartOnce();
           },
           onMouthLevel: (lvl) => {
             if (!cancelled && !completed) onMouthLevel?.(lvl);
           },
           onEnd: () => {
-            if (!cancelled && !completed) {
-              onMouthLevel?.(0);
-              startTurkishPhase();
-            }
+            if (cancelled || completed || arabicSettled) return;
+            arabicSettled = true;
+            onMouthLevel?.(0);
+            startTurkishPhase();
           },
           onError: (reason) => {
-            if (cancelled || completed) return;
+            if (cancelled || completed || arabicSettled) return;
+            arabicSettled = true;
             onFallbackNotice?.(
               `Doğrulanmış Arapça ses dosyası çalınamadı (${reason}); yalnızca Türkçe dua okunuyor.`
             );
@@ -453,6 +527,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
       cancelled = true;
       locked = false;
       phase = 'done';
+      clearArabicWatchdog();
       arabicPlayer.stop();
       turkishTts.stop();
       onMouthLevel?.(0);

@@ -386,6 +386,10 @@ export const createDefaultAppState = (): AppState => ({
     scholar1Rate: 0.76,
     scholar1Pitch: 0.68,
     seslenHasanRate: 0.94,
+    scholar1Engine: 'seslen_hasan',
+    emaLightningRate: 1.0,
+    emaLightningFallbackToHasan: true,
+    emaLightningApproved: false,
   },
   tiktok: {
     username: 'fcproplayer7',

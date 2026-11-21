@@ -802,11 +802,14 @@ test('11-12. Yâsîn has strictly NO Turkish meal on screen or in TTS, and Arabi
   const yasinEvent = buildYasinQueueEvent();
   assert.equal(yasinEvent.turkishMeaning, undefined, 'Yâsîn queue event must carry no turkishMeaning');
 
-  // Verify BroadcastView & StudioContext strictly exclude meal for yasin_300
+  // Verify BroadcastView never renders Arabic text or Turkish meal for any tier, and StudioContext keeps Yâsîn meal undefined
   const broadcastSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/components/BroadcastView.tsx'), 'utf8');
+  const broadcastDisplaySrc = fs.readFileSync(path.resolve(process.cwd(), 'src/services/broadcastDisplay.ts'), 'utf8');
   const studioCtxSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/context/StudioContext.tsx'), 'utf8');
-  assert.ok(broadcastSrc.includes("activeEvent.tier !== 'yasin_300' && activeEvent.turkishMeaning"));
-  assert.ok(broadcastSrc.includes('Yâsîn-i Şerîf okunuyor'));
+  assert.equal(broadcastSrc.includes('arabicHarekeli'), false);
+  assert.equal(broadcastSrc.includes('turkishMeaning'), false);
+  assert.equal(broadcastSrc.includes('Meal:'), false);
+  assert.ok(broadcastDisplaySrc.includes('Yâsîn-i Şerîf okunuyor'));
   assert.ok(studioCtxSrc.includes('turkishMeaning = undefined'));
 
   const spokenPayloads = [];

@@ -31,6 +31,14 @@ import {
   stopNativeArabicAudio,
   subscribeNativeArabicAudioEvents,
 } from './nativeArabicAudioBridge';
+import {
+  isEmaLightningPluginAvailable,
+  pauseEmaQueue,
+  resumeEmaQueue,
+  speakEmaQueue,
+  stopEmaQueue,
+  subscribeEmaEvents,
+} from './nativeEmaTtsBridge';
 
 export interface AvailableVoice {
   voiceURI: string;
@@ -571,7 +579,10 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
       utterance.onerror = (ev) => {
         if (this.playbackToken !== token) return;
         if (ev.error === 'interrupted' || ev.error === 'canceled') {
-          finish(false);
+          finish(
+            true,
+            `Sistem TTS konuşması kesintiye uğradı (${ev.error}).`
+          );
           return;
         }
         if (ev.error === 'not-allowed') {
@@ -1314,10 +1325,185 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
 }
 
 /**
+ * On-device EMA Lightning (8.6M params, 48 kHz mono, Turkish, Apache-2.0) candidate provider
+ * for Hacı Ahmet Efendi (scholar_1). Never delegates to Antalia-2 Mini.
+ */
+export class EmaLightningLocalTTSProvider implements ITTSProvider {
+  readonly id: TTSProviderType = 'browser_speech_synthesis';
+  readonly label = 'EMA Lightning (Yerel ONNX Runtime · 48 kHz)';
+  readonly isStudioGrade = true;
+
+  private activeUtteranceId: string | null = null;
+  private playbackToken = 0;
+  private utteranceCounter = 0;
+  private isPaused = false;
+  private safetyTimeout: number | null = null;
+  private unsubListeners: (() => void) | null = null;
+
+  isSupported(): boolean {
+    return isEmaLightningPluginAvailable();
+  }
+
+  private clearSafetyTimeout() {
+    if (this.safetyTimeout !== null) {
+      window.clearTimeout(this.safetyTimeout);
+      this.safetyTimeout = null;
+    }
+  }
+
+  private detachListeners() {
+    if (this.unsubListeners) {
+      this.unsubListeners();
+      this.unsubListeners = null;
+    }
+  }
+
+  speak(text: string, options: TTSSpeakOptions): void {
+    this.stop();
+    const token = ++this.playbackToken;
+
+    const cleanText = text.replace(/\s+/g, ' ').trim();
+    if (!cleanText) {
+      options.onEnd?.();
+      return;
+    }
+
+    if (!this.isSupported()) {
+      options.onError?.(
+        'EMA Lightning eklentisi Android üzerinde kullanılabilir değil.'
+      );
+      return;
+    }
+
+    const utteranceId = `ema_${Date.now()}_${++this.utteranceCounter}`;
+    this.activeUtteranceId = utteranceId;
+    this.isPaused = false;
+
+    let finished = false;
+    let startedNotified = false;
+
+    const finish = (isErr = false, msg?: string) => {
+      if (finished || this.playbackToken !== token) return;
+      finished = true;
+      this.activeUtteranceId = null;
+      this.isPaused = false;
+      this.clearSafetyTimeout();
+      this.detachListeners();
+      options.onMouthLevel?.(0);
+      if (isErr) {
+        options.onError?.(msg || 'EMA Lightning sentezi/oynatımı başarısız oldu.');
+      } else {
+        options.onEnd?.();
+      }
+    };
+
+    const armSafetyTimeout = (timeoutMs = 75000) => {
+      this.clearSafetyTimeout();
+      this.safetyTimeout = window.setTimeout(() => {
+        if (!finished && this.playbackToken === token && !this.isPaused) {
+          void stopEmaQueue();
+          finish(true, 'EMA Lightning oynatma zaman aşımına uğradı.');
+        }
+      }, timeoutMs);
+    };
+
+    const initialMaxMs = Math.max(
+      45000,
+      Math.min(180000, (cleanText.length / Math.max(0.65, options.rate || 1.0)) * 320)
+    );
+    armSafetyTimeout(initialMaxMs);
+    let lastWatchdogRefreshAt = performance.now();
+
+    const run = async () => {
+      try {
+        const unsub = await subscribeEmaEvents({
+          onStart: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            armSafetyTimeout(75000);
+            if (!startedNotified) {
+              startedNotified = true;
+              options.onStart?.();
+            }
+          },
+          onMouth: (ev) => {
+            if (finished || this.playbackToken !== token || this.isPaused) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            const now = performance.now();
+            if (now - lastWatchdogRefreshAt > 2000) {
+              lastWatchdogRefreshAt = now;
+              armSafetyTimeout(75000);
+            }
+            options.onMouthLevel?.(ev.level);
+          },
+          onDone: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId !== this.activeUtteranceId) return;
+            finish(false);
+          },
+          onError: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            finish(true, ev.message || 'EMA Lightning oynatma hatası.');
+          },
+        });
+
+        if (finished || this.playbackToken !== token) {
+          unsub();
+          return;
+        }
+        this.unsubListeners = unsub;
+
+        const res = await speakEmaQueue({
+          text: cleanText,
+          utteranceId,
+          rate: options.rate,
+          seed: 0,
+          volume: options.volume,
+        });
+
+        if (finished || this.playbackToken !== token) return;
+        if (!res.ok) {
+          finish(true, res.error || 'EMA Lightning konuşması başlatılamadı.');
+        }
+      } catch (err) {
+        finish(
+          true,
+          err instanceof Error ? err.message : 'EMA Lightning yerel köprü hatası.'
+        );
+      }
+    };
+
+    void run();
+  }
+
+  pause(): void {
+    this.isPaused = true;
+    this.clearSafetyTimeout();
+    void pauseEmaQueue();
+  }
+
+  resume(): void {
+    this.isPaused = false;
+    void resumeEmaQueue();
+  }
+
+  stop(): void {
+    this.playbackToken++;
+    this.activeUtteranceId = null;
+    this.isPaused = false;
+    this.clearSafetyTimeout();
+    this.detachListeners();
+    void stopEmaQueue();
+  }
+}
+
+/**
  * Unified per-scholar TTS router:
  * - On native Android APK builds:
- *   - Hacı Ahmet Efendi (`scholar_1`) uses strictly local `SeslenLocalTTSProvider` ("hasan" ONNX)
- *     and NEVER falls back to Antalia-2 Mini on error.
+ *   - Hacı Ahmet Efendi (`scholar_1`) defaults strictly to local `SeslenLocalTTSProvider` ("hasan" ONNX),
+ *     or optional `EmaLightningLocalTTSProvider` candidate when explicitly chosen, with pre-start-only
+ *     controlled fallback to Hasan (never double-speaking, and NEVER falls back to Antalia-2 Mini).
  *   - Hacı Mehmet Efendi (`scholar_2`) keeps `NativeAndroidTTSProvider` (Antalia-2 Mini) untouched.
  * - In Chrome Preview / standard web browsers (`!isNativeAndroidEnvironment()`), falls back to
  *   BrowserSpeechSynthesisProvider or optional ServerNeuralTTSProvider for desktop previewing.
@@ -1327,17 +1513,19 @@ export class StudioTTSRouter implements ITTSProvider {
   readonly label = 'NUR-I DUA Studio TTS Router';
   readonly isStudioGrade = false;
 
-  private activeEngine: 'browser' | 'native_android' | 'seslen_hasan' | 'neural' = 'browser';
+  private activeEngine: 'browser' | 'native_android' | 'seslen_hasan' | 'ema_lightning' | 'neural' = 'browser';
 
   constructor(
     private readonly browserProvider: BrowserSpeechSynthesisProvider,
     private readonly nativeAndroidProvider: NativeAndroidTTSProvider,
     private readonly neuralProvider: ServerNeuralTTSProvider,
-    private readonly seslenLocalProvider: SeslenLocalTTSProvider
+    private readonly seslenLocalProvider: SeslenLocalTTSProvider,
+    private readonly emaLocalProvider?: ITTSProvider
   ) {}
 
   isSupported(): boolean {
     return (
+      Boolean(this.emaLocalProvider?.isSupported()) ||
       this.seslenLocalProvider.isSupported() ||
       this.nativeAndroidProvider.isSupported() ||
       this.browserProvider.isSupported() ||
@@ -1345,7 +1533,7 @@ export class StudioTTSRouter implements ITTSProvider {
     );
   }
 
-  getActiveEngine(): 'browser' | 'native_android' | 'seslen_hasan' | 'neural' {
+  getActiveEngine(): 'browser' | 'native_android' | 'seslen_hasan' | 'ema_lightning' | 'neural' {
     return this.activeEngine;
   }
 
@@ -1366,13 +1554,68 @@ export class StudioTTSRouter implements ITTSProvider {
     const safeTurkishText = sanitizeTurkishTtsPayload(text, options.forbiddenMealText);
     if (!safeTurkishText.trim()) {
       options.onError?.(
-        'Arapça metin veya yalnızca ekranda gösterilen Türkçe meal metni TTS motorlarına (Seslen-TTS / Antalia-2 Mini) gönderilemez.'
+        'Arapça metin veya yalnızca ekranda gösterilen Türkçe meal metni TTS motorlarına (Seslen-TTS / EMA Lightning / Antalia-2 Mini) gönderilemez.'
       );
       return;
     }
 
     // Strict per-scholar isolation on Android:
-    // Hacı Ahmet Efendi (scholar_1) uses ONLY Seslen-TTS Hasan; never fallback to Antalia-2 Mini.
+    // Hacı Ahmet Efendi (scholar_1) uses Seslen-TTS Hasan by default, or EMA Lightning candidate if enabled.
+    // Never falls back to Antalia-2 Mini on error.
+    const shouldCheckAndroidScholar1 =
+      options.scholarId === 'scholar_1' &&
+      !options.forceStandardSystemTts &&
+      (isNativeAndroidEnvironment() || options.scholar1Engine === 'ema_lightning');
+
+    if (shouldCheckAndroidScholar1 && options.scholar1Engine === 'ema_lightning') {
+      if (this.emaLocalProvider?.isSupported()) {
+        let emaHasStartedAudio = false;
+        let fellBackToHasan = false;
+        this.activeEngine = 'ema_lightning';
+        this.emaLocalProvider.speak(safeTurkishText, {
+          ...options,
+          onStart: () => {
+            emaHasStartedAudio = true;
+            options.onStart?.();
+          },
+          onError: (emaErr) => {
+            if (
+              !emaHasStartedAudio &&
+              !fellBackToHasan &&
+              options.emaFallbackToHasan !== false &&
+              this.seslenLocalProvider.isSupported()
+            ) {
+              fellBackToHasan = true;
+              options.onFallbackNotice?.(
+                `EMA Lightning ses başlatılamadı (${emaErr}); Seslen-TTS Hasan motoruna kontrollü geçiş yapılıyor.`
+              );
+              this.activeEngine = 'seslen_hasan';
+              this.seslenLocalProvider.speak(safeTurkishText, options);
+              return;
+            }
+            options.onError?.(emaErr);
+          },
+        });
+        return;
+      }
+
+      if (options.emaFallbackToHasan !== false && this.seslenLocalProvider.isSupported()) {
+        options.onFallbackNotice?.(
+          'EMA Lightning bu ortamda desteklenmiyor; Seslen-TTS Hasan motoruna geçiliyor.'
+        );
+        this.activeEngine = 'seslen_hasan';
+        this.seslenLocalProvider.speak(safeTurkishText, options);
+        return;
+      }
+
+      if (isNativeAndroidEnvironment()) {
+        options.onError?.(
+          'EMA Lightning eklentisi Android üzerinde aktif değil ve Hasan fallback kullanılamıyor.'
+        );
+        return;
+      }
+    }
+
     if (
       options.scholarId === 'scholar_1' &&
       !options.forceStandardSystemTts &&
@@ -1411,7 +1654,9 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   pause(): void {
-    if (this.activeEngine === 'seslen_hasan') {
+    if (this.activeEngine === 'ema_lightning') {
+      this.emaLocalProvider?.pause();
+    } else if (this.activeEngine === 'seslen_hasan') {
       this.seslenLocalProvider.pause();
     } else if (this.activeEngine === 'neural') {
       this.neuralProvider.pause();
@@ -1423,7 +1668,9 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   resume(): void {
-    if (this.activeEngine === 'seslen_hasan') {
+    if (this.activeEngine === 'ema_lightning') {
+      this.emaLocalProvider?.resume();
+    } else if (this.activeEngine === 'seslen_hasan') {
       this.seslenLocalProvider.resume();
     } else if (this.activeEngine === 'neural') {
       this.neuralProvider.resume();
@@ -1435,6 +1682,7 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   stop(): void {
+    this.emaLocalProvider?.stop();
     this.seslenLocalProvider.stop();
     this.neuralProvider.stop();
     this.nativeAndroidProvider.stop();
@@ -1445,6 +1693,7 @@ export class StudioTTSRouter implements ITTSProvider {
 export interface AudioClipPlayOptions {
   volume: number;
   expectedSha256?: string;
+  startTimeoutMs?: number;
   onStart?: (info?: { durationMs?: number }) => void;
   onMouthLevel?: (level: number) => void;
   onProgress?: (info: { positionMs: number; durationMs: number }) => void;
@@ -1540,7 +1789,7 @@ export async function verifyAudioUrlSha256(
  * On Android APK builds, delegates to native `NurIDuaAudio` (MediaPlayer + PARTIAL_WAKE_LOCK + AudioFocus)
  * with native AssetManager SHA-256 verification before preparing MediaPlayer.
  * On Web/Browser builds, verifies expectedSha256 via Web Crypto before playing when crypto.subtle is available.
- * Enforces active-playback flag and token/playbackId isolation so incoming events never interrupt active audio.
+ * Enforces playback-start verification + start timeout watchdog so an unstarted clip never pretends to complete.
  */
 export class VerifiedAudioClipPlayer {
   private audioEl: HTMLAudioElement | null = null;
@@ -1551,6 +1800,7 @@ export class VerifiedAudioClipPlayer {
   private analyser: AnalyserNode | null = null;
   private rafId: number | null = null;
   private fallbackTimer: number | null = null;
+  private startWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private nativeUnsubListeners: (() => void) | null = null;
   private activeNativePlaybackId: string | null = null;
   private playbackMode: 'web' | 'native' | null = null;
@@ -1566,6 +1816,13 @@ export class VerifiedAudioClipPlayer {
 
   isPlaying(): boolean {
     return this.isPlayingInternal;
+  }
+
+  private clearStartWatchdog() {
+    if (this.startWatchdogTimer !== null) {
+      clearTimeout(this.startWatchdogTimer);
+      this.startWatchdogTimer = null;
+    }
   }
 
   private ensureAudioContext(): AudioContext | null {
@@ -1593,6 +1850,7 @@ export class VerifiedAudioClipPlayer {
   }
 
   private cleanupAudio(resetMouth?: (level: number) => void) {
+    this.clearStartWatchdog();
     if (this.rafId !== null) {
       window.cancelAnimationFrame(this.rafId);
       this.rafId = null;
@@ -1664,6 +1922,17 @@ export class VerifiedAudioClipPlayer {
     audio.volume = Math.min(1, Math.max(0, options.volume));
     this.audioEl = audio;
 
+    let hasStarted = false;
+    const startTimeoutMs = options.startTimeoutMs ?? 15000;
+    if (startTimeoutMs > 0) {
+      this.clearStartWatchdog();
+      this.startWatchdogTimer = setTimeout(() => {
+        if (!hasStarted && this.playbackToken === token) {
+          finish(true, `Ses oynatma beklenen sürede başlatılamadı (${displayUrl}).`);
+        }
+      }, startTimeoutMs);
+    }
+
     let analyserReady = false;
     try {
       const ctx = this.ensureAudioContext();
@@ -1714,6 +1983,8 @@ export class VerifiedAudioClipPlayer {
 
     audio.onplay = () => {
       if (this.playbackToken !== token) return;
+      hasStarted = true;
+      this.clearStartWatchdog();
       const durationMs = Number.isFinite(audio.duration) ? Math.round(audio.duration * 1000) : undefined;
       options.onStart?.({ durationMs });
       if (analyserReady) {
@@ -1734,7 +2005,14 @@ export class VerifiedAudioClipPlayer {
       }
     };
 
-    audio.onended = () => finish(false);
+    audio.onended = () => {
+      if (this.playbackToken !== token) return;
+      if (!hasStarted || (!Number.isFinite(audio.duration) && audio.currentTime <= 0)) {
+        finish(true, `Ses dosyası başlamadan sonlandı (${displayUrl}).`);
+        return;
+      }
+      finish(false);
+    };
     audio.onerror = () => finish(true, `Ses dosyası yüklenemedi veya çözülemedi (${displayUrl}).`);
 
     void audio.play().catch((err) => {
@@ -1769,6 +2047,7 @@ export class VerifiedAudioClipPlayer {
       this.activeNativePlaybackId = playbackId;
 
       let finished = false;
+      let hasStartedNative = false;
       const finishNative = (isErr = false, msg?: string) => {
         if (finished || this.playbackToken !== token) return;
         finished = true;
@@ -1780,12 +2059,25 @@ export class VerifiedAudioClipPlayer {
         }
       };
 
+      const startTimeoutMs = options.startTimeoutMs ?? 15000;
+      if (startTimeoutMs > 0) {
+        this.clearStartWatchdog();
+        this.startWatchdogTimer = setTimeout(() => {
+          if (!finished && !hasStartedNative && this.playbackToken === token) {
+            void stopNativeArabicAudio();
+            finishNative(true, 'Android MediaPlayer ses başlatma zaman aşımına uğradı.');
+          }
+        }, startTimeoutMs);
+      }
+
       const runNative = async () => {
         try {
           const unsub = await subscribeNativeArabicAudioEvents({
             onStart: (ev) => {
               if (finished || this.playbackToken !== token) return;
               if (ev.playbackId !== this.activeNativePlaybackId) return;
+              hasStartedNative = true;
+              this.clearStartWatchdog();
               options.onStart?.({ durationMs: ev.durationMs });
             },
             onProgress: (ev) => {
@@ -1797,6 +2089,24 @@ export class VerifiedAudioClipPlayer {
             onDone: (ev) => {
               if (finished || this.playbackToken !== token) return;
               if (ev.playbackId !== this.activeNativePlaybackId) return;
+              if (!hasStartedNative) {
+                finishNative(
+                  true,
+                  'Android MediaPlayer ses başlamadan erken tamamlandı (audioStart alınamadı).'
+                );
+                return;
+              }
+              if (
+                ev.durationMs >= 30000 &&
+                typeof ev.positionMs === 'number' &&
+                ev.positionMs < Math.round(ev.durationMs * 0.8)
+              ) {
+                finishNative(
+                  true,
+                  `Android MediaPlayer ses erken kesildi (${ev.positionMs} ms / ${ev.durationMs} ms); tamamlandı sayılmadı.`
+                );
+                return;
+              }
               finishNative(false);
             },
             onError: (ev) => {
@@ -1919,9 +2229,11 @@ export const browserTTSProvider = new BrowserSpeechSynthesisProvider();
 export const nativeAndroidTTSProvider = new NativeAndroidTTSProvider();
 export const serverNeuralTTSProvider = new ServerNeuralTTSProvider();
 export const seslenLocalTTSProvider = new SeslenLocalTTSProvider();
+export const emaLocalTTSProvider = new EmaLightningLocalTTSProvider();
 export const studioTTSRouter = new StudioTTSRouter(
   browserTTSProvider,
   nativeAndroidTTSProvider,
   serverNeuralTTSProvider,
-  seslenLocalTTSProvider
+  seslenLocalTTSProvider,
+  emaLocalTTSProvider
 );

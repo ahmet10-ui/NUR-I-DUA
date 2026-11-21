@@ -23,6 +23,7 @@ export interface NativeAudioProgressEvent {
 export interface NativeAudioDoneEvent {
   playbackId: string;
   durationMs: number;
+  positionMs?: number;
 }
 
 export interface NativeAudioErrorEvent {

@@ -20,6 +20,7 @@ interface BroadcastSnapshot {
     speakingState: 'idle' | 'speaking' | 'holding';
     activeScholar: 'scholar_1' | 'scholar_2';
     mouthLevel: number;
+    playbackStarted: boolean;
     updatedAt: string;
   };
 }
@@ -31,6 +32,7 @@ let snapshot: BroadcastSnapshot = {
     speakingState: 'idle',
     activeScholar: 'scholar_1',
     mouthLevel: 0,
+    playbackStarted: false,
     updatedAt: new Date().toISOString(),
   },
 };
@@ -118,6 +120,7 @@ async function startServer() {
       speakingState: body.speakingState ?? 'idle',
       activeScholar: body.activeScholar ?? 'scholar_1',
       mouthLevel: typeof body.mouthLevel === 'number' ? body.mouthLevel : 0,
+      playbackStarted: Boolean(body.playbackStarted),
       updatedAt: new Date().toISOString(),
     };
     broadcastSSE('live_playback', snapshot.livePlayback);

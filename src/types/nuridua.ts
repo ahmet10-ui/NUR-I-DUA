@@ -198,6 +198,10 @@ export interface VoiceSettingsConfig {
   scholar1Rate: number;
   scholar1Pitch: number;
   seslenHasanRate?: number;
+  scholar1Engine?: 'seslen_hasan' | 'ema_lightning';
+  emaLightningRate?: number;
+  emaLightningFallbackToHasan?: boolean;
+  emaLightningApproved?: boolean;
 }
 
 export type TikTokConnectionState =
@@ -354,6 +358,8 @@ export interface IScholarCharacterRig {
 
 export interface TTSSpeakOptions {
   scholarId?: ScholarId;
+  scholar1Engine?: 'seslen_hasan' | 'ema_lightning';
+  emaFallbackToHasan?: boolean;
   forceStandardSystemTts?: boolean;
   preferredEngine?: TTSProviderType;
   voiceURI?: string;

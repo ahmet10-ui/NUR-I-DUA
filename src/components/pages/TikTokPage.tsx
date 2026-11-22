@@ -6,9 +6,10 @@ import {
   PlugZap,
   Unplug,
   ShieldCheck,
-  Server,
   FlaskConical,
   X,
+  RefreshCw,
+  Activity,
 } from 'lucide-react';
 import { useStudio } from '../../context/StudioContext';
 import { getTikTokStateLabel } from '../../services/tiktokLiveConnectorService';
@@ -33,6 +34,8 @@ export const TikTokPage: React.FC = () => {
     state,
     updateTikTokConfig,
     attemptTikTokConnect,
+    reconnectTikTok,
+    checkRelayHealth,
     disconnectTikTok,
     recoveryGap,
     dismissRecoveryGap,
@@ -47,6 +50,18 @@ export const TikTokPage: React.FC = () => {
   const { tiktok } = state;
   const [connecting, setConnecting] = useState(false);
   const [connectFeedback, setConnectFeedback] = useState<string | null>(null);
+  const [healthLoading, setHealthLoading] = useState(false);
+  const [healthResult, setHealthResult] = useState<{
+    ok: boolean;
+    latencyMs: number;
+    url: string;
+    service?: string;
+    connectorVersion?: string;
+    simulationEnabled?: boolean;
+    hasSignApiKey?: boolean;
+    endpoints?: string[];
+    error?: string;
+  } | null>(null);
 
   // Isolated Test Event Generator
   const [simUser, setSimUser] = useState('zeynep.arslan');
@@ -58,6 +73,23 @@ export const TikTokPage: React.FC = () => {
 
   const statusLabel = getTikTokStateLabel(tiktok.connectionState);
   const statusBadgeClass = getStatusBadgeClass(tiktok.connectionState);
+
+  const handleHealthCheck = async () => {
+    setHealthLoading(true);
+    const res = await checkRelayHealth();
+    setHealthResult(res);
+    setHealthLoading(false);
+  };
+
+  const handleReconnect = async () => {
+    setConnecting(true);
+    setConnectFeedback(null);
+    const res = await reconnectTikTok();
+    setConnecting(false);
+    if (!res.ok) {
+      setConnectFeedback(res.error || 'TikTok LIVE yeniden bağlantısı başarısız.');
+    }
+  };
 
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,10 +151,13 @@ export const TikTokPage: React.FC = () => {
           </div>
           <p className="text-slate-300">
             Android Capacitor uygulaması ve tarayıcılar doğrudan Node.js{' '}
-            <code className="font-mono text-slate-100">tiktok-live-connector</code> paketini çalıştıramaz.
-            Gerçek TikTok canlı hediyelerini almak için bu istemci ayrı bir ücretsiz Node.js Relay Sunucusuna
-            (Render, Koyeb, Fly.io veya yerel bilgisayar) HTTPS + SSE ile bağlanır. Relay URL girilmediğinde
-            durum açıkça <strong>Not Configured</strong> olarak kalır; sahte canlı bağlantı üretilmez.
+            <code className="font-mono text-slate-100">tiktok-live-connector (2.5.0)</code> paketini çalıştıramaz.
+            Gerçek TikTok canlı hediyelerini ve takipçilerini almak için bu istemci ayrı Node.js 20+ Relay Sunucusuna
+            HTTPS + SSE ile bağlanır. Relay URL girilmediğinde durum açıkça <strong>Not Configured</strong> olarak kalır.
+          </p>
+          <p className="text-amber-200/90">
+            3. Parti Kütüphane Uyarısı: <code className="font-mono text-slate-100">tiktok-live-connector</code> resmi olmayan WebCast protokolüne ve yoğun trafikte{' '}
+            <code className="font-mono text-slate-100">SIGN_API_KEY</code> (EulerStream) / <code className="font-mono text-slate-100">SIGN_SERVER_URL</code> servisine bağlıdır.
           </p>
           {tiktok.connectionState === 'connected' && (
             <p className="text-emerald-300 font-mono-tabular">
@@ -133,7 +168,7 @@ export const TikTokPage: React.FC = () => {
           )}
           {tiktok.lastError && (
             <p className="text-rose-300">
-              Son Bilgi/Hata: {tiktok.lastError}
+              Son Bağlantı Hatası: {tiktok.lastError}
             </p>
           )}
         </div>
@@ -302,7 +337,43 @@ export const TikTokPage: React.FC = () => {
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-3 pt-1">
+          {healthResult && (
+            <div
+              className={`p-3 border text-xs space-y-1 ${
+                healthResult.ok
+                  ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                  : 'bg-rose-950/35 border-rose-500/40 text-rose-200'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 font-mono-tabular">
+                <span className="font-semibold">
+                  {healthResult.ok ? 'Relay Sağlığı Başarılı' : 'Relay Sağlığı Başarısız'}
+                </span>
+                <span>{healthResult.latencyMs} ms</span>
+              </div>
+              {healthResult.ok ? (
+                <p className="text-[11px] text-emerald-100/90 font-mono">
+                  v{healthResult.connectorVersion || '2.5.0'} · Simulation:{' '}
+                  {String(Boolean(healthResult.simulationEnabled))} · SignKey:{' '}
+                  {String(Boolean(healthResult.hasSignApiKey))}
+                </p>
+              ) : (
+                <p className="text-[11px]">{healthResult.error}</p>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2.5 pt-1">
+            <button
+              type="button"
+              onClick={() => void handleHealthCheck()}
+              disabled={healthLoading}
+              className="inline-flex items-center gap-2 bg-[#070E1F] hover:bg-[#101C3B] disabled:opacity-60 border border-[#C9A45C]/50 text-[#F4E3BD] text-xs font-medium px-3.5 py-2.5 cursor-pointer"
+            >
+              <Activity className="w-3.5 h-3.5 text-[#E5C88B]" />
+              <span>{healthLoading ? 'Test Ediliyor...' : 'Relay Sağlık Testi'}</span>
+            </button>
+
             <button
               type="submit"
               disabled={connecting || tiktok.connectionState === 'connecting'}
@@ -318,20 +389,76 @@ export const TikTokPage: React.FC = () => {
 
             <button
               type="button"
+              onClick={() => void handleReconnect()}
+              disabled={connecting || tiktok.connectionState === 'connecting'}
+              className="inline-flex items-center gap-2 bg-[#13234B] hover:bg-[#1B3166] disabled:opacity-60 border border-[#29437F] text-sky-200 text-xs px-3.5 py-2.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${connecting ? 'animate-spin' : ''}`} />
+              <span>Reconnect</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => void disconnectTikTok()}
-              className="inline-flex items-center gap-2 bg-[#070E1F] hover:bg-[#101C3B] border border-[#233969] text-slate-300 text-xs px-4 py-2.5 cursor-pointer"
+              className="inline-flex items-center gap-2 bg-[#070E1F] hover:bg-[#101C3B] border border-[#233969] text-slate-300 text-xs px-3.5 py-2.5 cursor-pointer"
             >
               <Unplug className="w-3.5 h-3.5" />
               <span>Disconnect</span>
             </button>
           </div>
 
-          <div className="pt-2 border-t border-[#16254A] text-[11px] text-slate-400 flex items-center justify-between">
-            <span className="inline-flex items-center gap-1.5">
-              <Server className="w-3.5 h-3.5 text-[#D4B26A]" />
-              <span>Real Gifts Recorded: {state.stats.realGifts}</span>
-            </span>
-            <span>Simulated Gifts: {state.stats.simulatedGifts}</span>
+          {/* Real Stream Telemetry vs Simulation Counter Isolation */}
+          <div className="pt-3 border-t border-[#16254A] space-y-2.5 text-[11px]">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="bg-[#070E1F] border border-[#1B2D58] p-2.5">
+                <span className="text-slate-400 block">Gerçek Hediye</span>
+                <strong className="font-mono-tabular text-sm text-emerald-300">
+                  {state.stats.realGifts}
+                </strong>
+              </div>
+              <div className="bg-[#070E1F] border border-[#1B2D58] p-2.5">
+                <span className="text-slate-400 block">Gerçek Takipçi</span>
+                <strong className="font-mono-tabular text-sm text-emerald-300">
+                  {state.stats.realFollowers ?? 0}
+                </strong>
+                {typeof tiktok.followerCount === 'number' && (
+                  <span className="block text-[10px] text-slate-400 font-mono">
+                    Oturum: {tiktok.followerCount}
+                  </span>
+                )}
+              </div>
+              <div className="bg-[#070E1F] border border-[#1B2D58] p-2.5">
+                <span className="text-slate-400 block">Simülasyon Hediye</span>
+                <strong className="font-mono-tabular text-sm text-[#E5C88B]">
+                  {state.stats.simulatedGifts}
+                </strong>
+              </div>
+              <div className="bg-[#070E1F] border border-[#1B2D58] p-2.5">
+                <span className="text-slate-400 block">Simülasyon Takipçi</span>
+                <strong className="font-mono-tabular text-sm text-[#E5C88B]">
+                  {state.stats.simulatedFollowers ?? 0}
+                </strong>
+              </div>
+            </div>
+
+            {tiktok.lastEvent && (
+              <div className="bg-[#070E1F] border border-emerald-500/30 p-2.5 flex items-center justify-between gap-3">
+                <div>
+                  <span className="text-emerald-300 font-semibold block">Son Gelen Gerçek Olay</span>
+                  <span className="text-slate-200">{tiktok.lastEvent.summary}</span>
+                </div>
+                <span className="font-mono-tabular text-slate-400 shrink-0">
+                  {new Date(tiktok.lastEvent.timestamp).toLocaleTimeString()}
+                </span>
+              </div>
+            )}
+
+            {tiktok.lastError && (
+              <div className="bg-rose-950/30 border border-rose-500/35 p-2.5 text-rose-200">
+                <span className="font-semibold text-rose-300 block">Son Bağlantı Hatası</span>
+                <span>{tiktok.lastError}</span>
+              </div>
+            )}
           </div>
         </form>
 

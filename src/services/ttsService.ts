@@ -39,6 +39,15 @@ import {
   stopEmaQueue,
   subscribeEmaEvents,
 } from './nativeEmaTtsBridge';
+import {
+  isZerrePluginAvailable,
+  pauseZerreQueue,
+  resumeZerreQueue,
+  speakZerreQueue,
+  stopZerreQueue,
+  subscribeZerreEvents,
+} from './nativeZerreTtsBridge';
+import { normalizeTurkishForZerre } from './zerreTextFrontend';
 
 export interface AvailableVoice {
   voiceURI: string;
@@ -1499,11 +1508,184 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
 }
 
 /**
+ * Native Android local ONNX TTS provider using `ZerreTts` (`Zerre-TTS SES-A / MK`, male voice=0).
+ * Strictly isolated from Antalia-2 Mini / Google TTS; keeps Seslen-TTS Hasan as opt-out baseline.
+ */
+export class ZerreLocalTTSProvider implements ITTSProvider {
+  readonly id: TTSProviderType = 'browser_speech_synthesis';
+  readonly label = 'Zerre-TTS SES-A (MK Yerel ONNX)';
+  readonly isStudioGrade = true;
+
+  private playbackToken = 0;
+  private activeUtteranceId: string | null = null;
+  private isPaused = false;
+  private safetyTimeout: number | null = null;
+  private unsubListeners: (() => void) | null = null;
+  private utteranceCounter = 0;
+
+  isSupported(): boolean {
+    return isZerrePluginAvailable();
+  }
+
+  private clearSafetyTimeout() {
+    if (this.safetyTimeout !== null) {
+      window.clearTimeout(this.safetyTimeout);
+      this.safetyTimeout = null;
+    }
+  }
+
+  private detachListeners() {
+    if (this.unsubListeners) {
+      this.unsubListeners();
+      this.unsubListeners = null;
+    }
+  }
+
+  speak(text: string, options: TTSSpeakOptions): void {
+    this.stop();
+    const token = ++this.playbackToken;
+
+    const cleanText = normalizeTurkishForZerre(text);
+    if (!cleanText) {
+      options.onEnd?.();
+      return;
+    }
+
+    if (!this.isSupported()) {
+      options.onError?.(
+        'Zerre SES-A (MK) eklentisi Android üzerinde kullanılabilir değil.'
+      );
+      return;
+    }
+
+    const utteranceId = `zerre_${Date.now()}_${++this.utteranceCounter}`;
+    this.activeUtteranceId = utteranceId;
+    this.isPaused = false;
+
+    let finished = false;
+    let startedNotified = false;
+
+    const finish = (isErr = false, msg?: string) => {
+      if (finished || this.playbackToken !== token) return;
+      finished = true;
+      this.activeUtteranceId = null;
+      this.isPaused = false;
+      this.clearSafetyTimeout();
+      this.detachListeners();
+      options.onMouthLevel?.(0);
+      if (isErr) {
+        options.onError?.(msg || 'Zerre SES-A (MK) sentezi/oynatımı başarısız oldu.');
+      } else {
+        options.onEnd?.();
+      }
+    };
+
+    const armSafetyTimeout = (timeoutMs = 75000) => {
+      this.clearSafetyTimeout();
+      this.safetyTimeout = window.setTimeout(() => {
+        if (!finished && this.playbackToken === token && !this.isPaused) {
+          void stopZerreQueue();
+          finish(true, 'Zerre SES-A oynatma zaman aşımına uğradı.');
+        }
+      }, timeoutMs);
+    };
+
+    const initialMaxMs = Math.max(
+      45000,
+      Math.min(180000, (cleanText.length / Math.max(0.65, options.rate || 0.94)) * 340)
+    );
+    armSafetyTimeout(initialMaxMs);
+    let lastWatchdogRefreshAt = performance.now();
+
+    const run = async () => {
+      try {
+        const unsub = await subscribeZerreEvents({
+          onStart: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            armSafetyTimeout(75000);
+            if (!startedNotified) {
+              startedNotified = true;
+              options.onStart?.();
+            }
+          },
+          onMouth: (ev) => {
+            if (finished || this.playbackToken !== token || this.isPaused) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            const now = performance.now();
+            if (now - lastWatchdogRefreshAt > 2000) {
+              lastWatchdogRefreshAt = now;
+              armSafetyTimeout(75000);
+            }
+            options.onMouthLevel?.(ev.level);
+          },
+          onDone: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId !== this.activeUtteranceId) return;
+            finish(false);
+          },
+          onError: (ev) => {
+            if (finished || this.playbackToken !== token) return;
+            if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
+            finish(true, ev.message || 'Zerre SES-A (MK) oynatma hatası.');
+          },
+        });
+
+        if (finished || this.playbackToken !== token) {
+          unsub();
+          return;
+        }
+        this.unsubListeners = unsub;
+
+        const res = await speakZerreQueue({
+          text: cleanText,
+          utteranceId,
+          rate: options.rate,
+          volume: options.volume,
+        });
+
+        if (finished || this.playbackToken !== token) return;
+        if (!res.ok) {
+          finish(true, res.error || 'Zerre SES-A (MK) konuşması başlatılamadı.');
+        }
+      } catch (err) {
+        finish(
+          true,
+          err instanceof Error ? err.message : 'Zerre SES-A yerel köprü hatası.'
+        );
+      }
+    };
+
+    void run();
+  }
+
+  pause(): void {
+    this.isPaused = true;
+    this.clearSafetyTimeout();
+    void pauseZerreQueue();
+  }
+
+  resume(): void {
+    this.isPaused = false;
+    void resumeZerreQueue();
+  }
+
+  stop(): void {
+    this.playbackToken++;
+    this.activeUtteranceId = null;
+    this.isPaused = false;
+    this.clearSafetyTimeout();
+    this.detachListeners();
+    void stopZerreQueue();
+  }
+}
+
+/**
  * Unified per-scholar TTS router:
  * - On native Android APK builds:
  *   - Hacı Ahmet Efendi (`scholar_1`) defaults strictly to local `SeslenLocalTTSProvider` ("hasan" ONNX),
- *     or optional `EmaLightningLocalTTSProvider` candidate when explicitly chosen, with pre-start-only
- *     controlled fallback to Hasan (never double-speaking, and NEVER falls back to Antalia-2 Mini).
+ *     or optional `EmaLightningLocalTTSProvider` / `ZerreLocalTTSProvider` when explicitly chosen,
+ *     with pre-start-only controlled fallback to Hasan (never double-speaking, NEVER Antalia-2 Mini).
  *   - Hacı Mehmet Efendi (`scholar_2`) keeps `NativeAndroidTTSProvider` (Antalia-2 Mini) untouched.
  * - In Chrome Preview / standard web browsers (`!isNativeAndroidEnvironment()`), falls back to
  *   BrowserSpeechSynthesisProvider or optional ServerNeuralTTSProvider for desktop previewing.
@@ -1513,18 +1695,26 @@ export class StudioTTSRouter implements ITTSProvider {
   readonly label = 'NUR-I DUA Studio TTS Router';
   readonly isStudioGrade = false;
 
-  private activeEngine: 'browser' | 'native_android' | 'seslen_hasan' | 'ema_lightning' | 'neural' = 'browser';
+  private activeEngine:
+    | 'browser'
+    | 'native_android'
+    | 'seslen_hasan'
+    | 'ema_lightning'
+    | 'zerre_ses_a'
+    | 'neural' = 'browser';
 
   constructor(
     private readonly browserProvider: BrowserSpeechSynthesisProvider,
     private readonly nativeAndroidProvider: NativeAndroidTTSProvider,
     private readonly neuralProvider: ServerNeuralTTSProvider,
     private readonly seslenLocalProvider: SeslenLocalTTSProvider,
-    private readonly emaLocalProvider?: ITTSProvider
+    private readonly emaLocalProvider?: ITTSProvider,
+    private readonly zerreLocalProvider?: ITTSProvider
   ) {}
 
   isSupported(): boolean {
     return (
+      Boolean(this.zerreLocalProvider?.isSupported()) ||
       Boolean(this.emaLocalProvider?.isSupported()) ||
       this.seslenLocalProvider.isSupported() ||
       this.nativeAndroidProvider.isSupported() ||
@@ -1533,7 +1723,13 @@ export class StudioTTSRouter implements ITTSProvider {
     );
   }
 
-  getActiveEngine(): 'browser' | 'native_android' | 'seslen_hasan' | 'ema_lightning' | 'neural' {
+  getActiveEngine():
+    | 'browser'
+    | 'native_android'
+    | 'seslen_hasan'
+    | 'ema_lightning'
+    | 'zerre_ses_a'
+    | 'neural' {
     return this.activeEngine;
   }
 
@@ -1554,18 +1750,69 @@ export class StudioTTSRouter implements ITTSProvider {
     const safeTurkishText = sanitizeTurkishTtsPayload(text, options.forbiddenMealText);
     if (!safeTurkishText.trim()) {
       options.onError?.(
-        'Arapça metin veya yalnızca ekranda gösterilen Türkçe meal metni TTS motorlarına (Seslen-TTS / EMA Lightning / Antalia-2 Mini) gönderilemez.'
+        'Arapça metin veya yalnızca ekranda gösterilen Türkçe meal metni TTS motorlarına (Seslen-TTS / Zerre SES-A / EMA Lightning / Antalia-2 Mini) gönderilemez.'
       );
       return;
     }
 
     // Strict per-scholar isolation on Android:
-    // Hacı Ahmet Efendi (scholar_1) uses Seslen-TTS Hasan by default, or EMA Lightning candidate if enabled.
+    // Hacı Ahmet Efendi (scholar_1) uses Seslen-TTS Hasan by default, or opt-in Zerre SES-A / EMA Lightning.
     // Never falls back to Antalia-2 Mini on error.
     const shouldCheckAndroidScholar1 =
       options.scholarId === 'scholar_1' &&
       !options.forceStandardSystemTts &&
-      (isNativeAndroidEnvironment() || options.scholar1Engine === 'ema_lightning');
+      (isNativeAndroidEnvironment() ||
+        options.scholar1Engine === 'ema_lightning' ||
+        options.scholar1Engine === 'zerre_ses_a');
+
+    if (shouldCheckAndroidScholar1 && options.scholar1Engine === 'zerre_ses_a') {
+      if (this.zerreLocalProvider?.isSupported()) {
+        let zerreHasStartedAudio = false;
+        let fellBackToHasan = false;
+        this.activeEngine = 'zerre_ses_a';
+        this.zerreLocalProvider.speak(safeTurkishText, {
+          ...options,
+          onStart: () => {
+            zerreHasStartedAudio = true;
+            options.onStart?.();
+          },
+          onError: (zerreErr) => {
+            if (
+              !zerreHasStartedAudio &&
+              !fellBackToHasan &&
+              options.zerreFallbackToHasan !== false &&
+              this.seslenLocalProvider.isSupported()
+            ) {
+              fellBackToHasan = true;
+              options.onFallbackNotice?.(
+                `Zerre SES-A ses başlatılamadı (${zerreErr}); Seslen-TTS Hasan motoruna kontrollü geçiş yapılıyor.`
+              );
+              this.activeEngine = 'seslen_hasan';
+              this.seslenLocalProvider.speak(safeTurkishText, options);
+              return;
+            }
+            options.onError?.(zerreErr);
+          },
+        });
+        return;
+      }
+
+      if (options.zerreFallbackToHasan !== false && this.seslenLocalProvider.isSupported()) {
+        options.onFallbackNotice?.(
+          'Zerre SES-A bu ortamda desteklenmiyor; Seslen-TTS Hasan motoruna geçiliyor.'
+        );
+        this.activeEngine = 'seslen_hasan';
+        this.seslenLocalProvider.speak(safeTurkishText, options);
+        return;
+      }
+
+      if (isNativeAndroidEnvironment()) {
+        options.onError?.(
+          'Zerre SES-A (MK) eklentisi Android üzerinde aktif değil ve Hasan fallback kullanılamıyor.'
+        );
+        return;
+      }
+    }
 
     if (shouldCheckAndroidScholar1 && options.scholar1Engine === 'ema_lightning') {
       if (this.emaLocalProvider?.isSupported()) {
@@ -1654,7 +1901,9 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   pause(): void {
-    if (this.activeEngine === 'ema_lightning') {
+    if (this.activeEngine === 'zerre_ses_a') {
+      this.zerreLocalProvider?.pause();
+    } else if (this.activeEngine === 'ema_lightning') {
       this.emaLocalProvider?.pause();
     } else if (this.activeEngine === 'seslen_hasan') {
       this.seslenLocalProvider.pause();
@@ -1668,7 +1917,9 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   resume(): void {
-    if (this.activeEngine === 'ema_lightning') {
+    if (this.activeEngine === 'zerre_ses_a') {
+      this.zerreLocalProvider?.resume();
+    } else if (this.activeEngine === 'ema_lightning') {
       this.emaLocalProvider?.resume();
     } else if (this.activeEngine === 'seslen_hasan') {
       this.seslenLocalProvider.resume();
@@ -1682,6 +1933,7 @@ export class StudioTTSRouter implements ITTSProvider {
   }
 
   stop(): void {
+    this.zerreLocalProvider?.stop();
     this.emaLocalProvider?.stop();
     this.seslenLocalProvider.stop();
     this.neuralProvider.stop();
@@ -2230,10 +2482,12 @@ export const nativeAndroidTTSProvider = new NativeAndroidTTSProvider();
 export const serverNeuralTTSProvider = new ServerNeuralTTSProvider();
 export const seslenLocalTTSProvider = new SeslenLocalTTSProvider();
 export const emaLocalTTSProvider = new EmaLightningLocalTTSProvider();
+export const zerreLocalTTSProvider = new ZerreLocalTTSProvider();
 export const studioTTSRouter = new StudioTTSRouter(
   browserTTSProvider,
   nativeAndroidTTSProvider,
   serverNeuralTTSProvider,
   seslenLocalTTSProvider,
-  emaLocalTTSProvider
+  emaLocalTTSProvider,
+  zerreLocalTTSProvider
 );

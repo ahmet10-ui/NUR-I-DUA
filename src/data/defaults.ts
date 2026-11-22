@@ -390,6 +390,9 @@ export const createDefaultAppState = (): AppState => ({
     emaLightningRate: 1.0,
     emaLightningFallbackToHasan: true,
     emaLightningApproved: false,
+    zerreSesARate: 0.94,
+    zerreSesAFallbackToHasan: true,
+    zerreSesAApproved: false,
   },
   tiktok: {
     username: 'fcproplayer7',
@@ -403,6 +406,8 @@ export const createDefaultAppState = (): AppState => ({
     lastCheckedAt: null,
     roomId: null,
     viewerCount: null,
+    followerCount: null,
+    lastEvent: null,
   },
   broadcast: {
     studioTitle: 'NUR-I DUA',
@@ -427,6 +432,8 @@ export const createDefaultAppState = (): AppState => ({
     totalPrayers: 0,
     simulatedGifts: 0,
     realGifts: 0,
+    realFollowers: 0,
+    simulatedFollowers: 0,
   },
   lastUpdatedAt: nowIso(),
 });

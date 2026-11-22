@@ -254,6 +254,30 @@ export default function App() {
     setIsAuthenticated(false);
   };
 
+  const [standaloneExitTopPx, setStandaloneExitTopPx] = useState<number>(12);
+
+  useEffect(() => {
+    if (!standaloneBroadcast || typeof window === 'undefined') return;
+    const computeExitTop = () => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const frameW = Math.min(vw, (vh * 9) / 16);
+      const frameH = (frameW * 16) / 9;
+      const gutterLeft = (vw - frameW) / 2;
+      const gutterTop = (vh - frameH) / 2;
+      // Place in side gutter on landscape, top black gutter on tall mobile (gutterTop >= 48),
+      // or cleanly below the ~68px top coin-tier bar on exact/full-bleed 9:16 screens.
+      if (gutterLeft >= 150 || gutterTop >= 48) {
+        setStandaloneExitTopPx(12);
+      } else {
+        setStandaloneExitTopPx(Math.round(gutterTop + 80));
+      }
+    };
+    computeExitTop();
+    window.addEventListener('resize', computeExitTop);
+    return () => window.removeEventListener('resize', computeExitTop);
+  }, [standaloneBroadcast]);
+
   // Dedicated OBS Browser Source / Clean Broadcast View (zero dashboard controls)
   if (standaloneBroadcast) {
     const obsClean =
@@ -261,13 +285,15 @@ export default function App() {
       new URLSearchParams(window.location.search).get('obs') === '1';
     return (
       <StudioProvider isBroadcastView>
-        <div className="relative">
+        <div className="relative w-screen h-screen bg-[#090706] overflow-hidden">
           <BroadcastView standalone />
           {!obsClean && (
             <button
               type="button"
+              data-testid="standalone-exit-button"
               onClick={exitStandaloneBroadcast}
-              className="fixed top-3 left-3 z-50 opacity-20 hover:opacity-100 focus:opacity-100 transition-opacity inline-flex items-center gap-1.5 bg-[#080F22]/90 border border-[#C9A45C]/40 px-3 py-1.5 text-xs text-[#E5C88B] cursor-pointer"
+              style={{ top: `calc(env(safe-area-inset-top, 0px) + ${standaloneExitTopPx}px)` }}
+              className="fixed left-3 z-50 opacity-35 hover:opacity-100 focus:opacity-100 transition-opacity inline-flex items-center gap-1.5 bg-[#080F22]/90 border border-[#C9A45C]/40 px-3 py-1.5 text-xs text-[#E5C88B] cursor-pointer"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>Control Center</span>

@@ -160,6 +160,18 @@ interface StudioContextValue {
   ) => Promise<{ ok: boolean; message: string }>;
   updateTikTokConfig: (patch: Partial<TikTokConnectionConfig>) => void;
   attemptTikTokConnect: () => Promise<{ ok: boolean; error?: string }>;
+  reconnectTikTok: () => Promise<{ ok: boolean; error?: string }>;
+  checkRelayHealth: (explicitEndpoint?: string) => Promise<{
+    ok: boolean;
+    latencyMs: number;
+    url: string;
+    service?: string;
+    connectorVersion?: string;
+    simulationEnabled?: boolean;
+    hasSignApiKey?: boolean;
+    endpoints?: string[];
+    error?: string;
+  }>;
   disconnectTikTok: () => void | Promise<void>;
   recoveryGap: TikTokRecoveryGapInfo | null;
   dismissRecoveryGap: () => void;
@@ -350,7 +362,11 @@ function recoverInitialState(): AppState {
       ...defaults.voice,
       ...(saved.voice || {}),
       scholar1Engine:
-        saved.voice?.scholar1Engine === 'ema_lightning' ? 'ema_lightning' : 'seslen_hasan',
+        saved.voice?.scholar1Engine === 'ema_lightning'
+          ? 'ema_lightning'
+          : saved.voice?.scholar1Engine === 'zerre_ses_a'
+          ? 'zerre_ses_a'
+          : 'seslen_hasan',
       emaLightningRate:
         typeof saved.voice?.emaLightningRate === 'number'
           ? saved.voice.emaLightningRate
@@ -363,6 +379,18 @@ function recoverInitialState(): AppState {
         typeof saved.voice?.emaLightningApproved === 'boolean'
           ? saved.voice.emaLightningApproved
           : defaults.voice.emaLightningApproved,
+      zerreSesARate:
+        typeof saved.voice?.zerreSesARate === 'number'
+          ? saved.voice.zerreSesARate
+          : defaults.voice.zerreSesARate,
+      zerreSesAFallbackToHasan:
+        typeof saved.voice?.zerreSesAFallbackToHasan === 'boolean'
+          ? saved.voice.zerreSesAFallbackToHasan
+          : defaults.voice.zerreSesAFallbackToHasan,
+      zerreSesAApproved:
+        typeof saved.voice?.zerreSesAApproved === 'boolean'
+          ? saved.voice.zerreSesAApproved
+          : defaults.voice.zerreSesAApproved,
     },
     tiktok: {
       ...defaults.tiktok,
@@ -372,6 +400,8 @@ function recoverInitialState(): AppState {
       connectionState: saved.tiktok?.connectorEndpoint?.trim() ? 'disconnected' : 'unconfigured',
       roomId: null,
       viewerCount: null,
+      followerCount: null,
+      lastEvent: null,
     },
     broadcast: { ...defaults.broadcast, ...(saved.broadcast || {}) },
     logs: Array.isArray(saved.logs) ? saved.logs : defaults.logs,
@@ -935,6 +965,26 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         const next: AppState = {
           ...prev,
           queue: dedupeEventsById([...prev.queue, followEvent]),
+          stats: {
+            ...prev.stats,
+            realFollowers: (prev.stats.realFollowers ?? 0) + (params.source === 'real' ? 1 : 0),
+            simulatedFollowers:
+              (prev.stats.simulatedFollowers ?? 0) + (params.source === 'simulation' ? 1 : 0),
+          },
+          tiktok:
+            params.source === 'real'
+              ? {
+                  ...prev.tiktok,
+                  lastEvent: {
+                    kind: 'follow',
+                    username: safeUser,
+                    displayUsername: `@${safeUser}`,
+                    summary: 'Yeni takipçi',
+                    timestamp: followEvent.createdAt,
+                    eventId: followEvent.id,
+                  },
+                }
+              : prev.tiktok,
           lastUpdatedAt: new Date().toISOString(),
         };
         saveLocalState(next);
@@ -1289,11 +1339,17 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     });
     const isAndroidNative = isNativeAndroidEnvironment();
     const chosenScholar1Engine =
-      voiceCfg.scholar1Engine === 'ema_lightning' ? 'ema_lightning' : 'seslen_hasan';
+      voiceCfg.scholar1Engine === 'ema_lightning'
+        ? 'ema_lightning'
+        : voiceCfg.scholar1Engine === 'zerre_ses_a'
+        ? 'zerre_ses_a'
+        : 'seslen_hasan';
     const effectiveRate =
       startedEvent.scholarId === 'scholar_1' && isAndroidNative
         ? chosenScholar1Engine === 'ema_lightning'
           ? voiceCfg.emaLightningRate ?? 1.0
+          : chosenScholar1Engine === 'zerre_ses_a'
+          ? voiceCfg.zerreSesARate ?? 0.94
           : voiceCfg.seslenHasanRate ?? 0.94
         : prosody.rate;
 
@@ -1305,6 +1361,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           ? chosenScholar1Engine === 'ema_lightning'
             ? `Dua kuyruğu motor yönlendirmesi: Hacı Ahmet Efendi (scholar_1) -> EMA Lightning (Yerel ONNX 48 kHz${
                 voiceCfg.emaLightningFallbackToHasan !== false ? ' · pre-start Hasan fallback açık' : ''
+              })`
+            : chosenScholar1Engine === 'zerre_ses_a'
+            ? `Dua kuyruğu motor yönlendirmesi: Hacı Ahmet Efendi (scholar_1) -> Zerre SES-A (MK Yerel ONNX 24 kHz${
+                voiceCfg.zerreSesAFallbackToHasan !== false ? ' · pre-start Hasan fallback açık' : ''
               })`
             : 'Dua kuyruğu motor yönlendirmesi: Hacı Ahmet Efendi (scholar_1) -> Seslen-TTS Hasan (Yerel ONNX)'
           : 'Dua kuyruğu motor yönlendirmesi: Hacı Mehmet Efendi (scholar_2) -> Antalia-2 Mini (Android Sistem TTS)'
@@ -1325,6 +1385,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         scholarId: startedEvent.scholarId,
         scholar1Engine: startedEvent.scholarId === 'scholar_1' ? chosenScholar1Engine : undefined,
         emaFallbackToHasan: voiceCfg.emaLightningFallbackToHasan,
+        zerreFallbackToHasan: voiceCfg.zerreSesAFallbackToHasan,
+        zerreApproved: voiceCfg.zerreSesAApproved,
         preferredEngine: voiceCfg.provider,
         voiceURI: chosenVoiceURI,
         neuralProviderId: voiceCfg.neuralProviderId,
@@ -1671,11 +1733,17 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       });
 
       const chosenScholar1Engine =
-        voiceCfg.scholar1Engine === 'ema_lightning' ? 'ema_lightning' : 'seslen_hasan';
+        voiceCfg.scholar1Engine === 'ema_lightning'
+          ? 'ema_lightning'
+          : voiceCfg.scholar1Engine === 'zerre_ses_a'
+          ? 'zerre_ses_a'
+          : 'seslen_hasan';
       const effectiveRate =
         scholarId === 'scholar_1' && isNativeAndroidEnvironment()
           ? chosenScholar1Engine === 'ema_lightning'
             ? voiceCfg.emaLightningRate ?? 1.0
+            : chosenScholar1Engine === 'zerre_ses_a'
+            ? voiceCfg.zerreSesARate ?? 0.94
             : voiceCfg.seslenHasanRate ?? 0.94
           : prosody.rate;
 
@@ -1689,6 +1757,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         scholarId,
         scholar1Engine: scholarId === 'scholar_1' ? chosenScholar1Engine : undefined,
         emaFallbackToHasan: voiceCfg.emaLightningFallbackToHasan,
+        zerreFallbackToHasan: voiceCfg.zerreSesAFallbackToHasan,
+        zerreApproved: voiceCfg.zerreSesAApproved,
         preferredEngine: voiceCfg.provider,
         voiceURI: chosenVoiceURI,
         neuralProviderId: voiceCfg.neuralProviderId,
@@ -1836,6 +1906,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         state: TikTokConnectionConfig['connectionState'];
         roomId?: string | null;
         viewerCount?: number | null;
+        followerCount?: number | null;
+        lastEvent?: TikTokConnectionConfig['lastEvent'];
         error?: string | null;
         updatedAt: string;
       }) => {
@@ -1843,11 +1915,17 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           const nextRoomId = payload.roomId !== undefined ? payload.roomId : prev.tiktok.roomId;
           const nextViewerCount =
             payload.viewerCount !== undefined ? payload.viewerCount : prev.tiktok.viewerCount;
+          const nextFollowerCount =
+            payload.followerCount !== undefined ? payload.followerCount : prev.tiktok.followerCount;
+          const nextLastEvent =
+            payload.lastEvent !== undefined ? payload.lastEvent : prev.tiktok.lastEvent;
           const nextError = payload.error !== undefined ? payload.error : prev.tiktok.lastError;
           if (
             prev.tiktok.connectionState === payload.state &&
             prev.tiktok.roomId === nextRoomId &&
             prev.tiktok.viewerCount === nextViewerCount &&
+            prev.tiktok.followerCount === nextFollowerCount &&
+            prev.tiktok.lastEvent === nextLastEvent &&
             prev.tiktok.lastError === nextError
           ) {
             return prev;
@@ -1859,6 +1937,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
               connectionState: payload.state,
               roomId: nextRoomId,
               viewerCount: nextViewerCount,
+              followerCount: nextFollowerCount,
+              lastEvent: nextLastEvent,
               lastError: nextError,
               lastCheckedAt: payload.updatedAt,
             },
@@ -1881,9 +1961,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         giftType?: number;
         repeatEnd?: boolean;
         streakKey: string;
+        transactionId?: string;
         sseEventId?: string;
       }) => {
-        enqueueGiftEvent({
+        const res = enqueueGiftEvent({
           source: gift.isSimulated ? 'simulation' : 'real',
           username: gift.username,
           userId: gift.userId,
@@ -1894,8 +1975,26 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           repeatCount: gift.repeatCount ?? gift.quantity,
           giftType: gift.giftType,
           repeatEnd: gift.repeatEnd,
-          externalDedupeKey: gift.streakKey || gift.sseEventId,
+          externalDedupeKey: gift.transactionId || gift.streakKey || gift.sseEventId,
         });
+        if (!gift.isSimulated && res.ok && res.event) {
+          const ev = res.event;
+          setState((prev) => ({
+            ...prev,
+            tiktok: {
+              ...prev.tiktok,
+              lastEvent: {
+                kind: 'gift',
+                username: ev.username,
+                displayUsername: ev.displayUsername,
+                summary: `${ev.giftName} ×${ev.quantity}`,
+                coins: ev.eventCoins,
+                timestamp: ev.createdAt,
+                eventId: ev.id,
+              },
+            },
+          }));
+        }
       },
       onFollowEvent: (follow: {
         isSimulated?: boolean;
@@ -2001,6 +2100,45 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       appendLog('warning', 'tiktok', result.error);
     }
     return result;
+  }, [appendLog, createConnectorCallbacks]);
+
+  const reconnectTikTok = useCallback(async () => {
+    const tk = stateRef.current.tiktok;
+    const callbacks = createConnectorCallbacks();
+    const connector =
+      tiktokConnectorRef.current || new TikTokLiveConnectorService(tk, callbacks);
+    connector.updateCallbacks(callbacks);
+    if (!tiktokConnectorRef.current) {
+      tiktokConnectorRef.current = connector;
+    }
+    setSimulationStreamActive(false);
+    connector.updateConfig(tk);
+    const result = await connector.reconnect(tk.username);
+    if (!result.ok && result.error) {
+      appendLog('warning', 'tiktok', `TikTok LIVE yeniden bağlanma hatası: ${result.error}`);
+    } else {
+      appendLog('info', 'tiktok', `TikTok LIVE yeniden bağlandı (@${tk.username}).`);
+    }
+    return result;
+  }, [appendLog, createConnectorCallbacks]);
+
+  const checkRelayHealth = useCallback(async (explicitEndpoint?: string) => {
+    const tk = stateRef.current.tiktok;
+    const connector =
+      tiktokConnectorRef.current || new TikTokLiveConnectorService(tk, createConnectorCallbacks());
+    connector.updateConfig({
+      ...tk,
+      ...(explicitEndpoint !== undefined ? { connectorEndpoint: explicitEndpoint } : {}),
+    });
+    const res = await connector.checkHealth(explicitEndpoint);
+    appendLog(
+      res.ok ? 'info' : 'warning',
+      'tiktok',
+      res.ok
+        ? `Relay sağlık testi başarılı (${res.latencyMs} ms · v${res.connectorVersion || '2.5.0'} · simulation=${String(res.simulationEnabled)}).`
+        : `Relay sağlık testi başarısız: ${res.error || 'Bilinmeyen hata'}`
+    );
+    return res;
   }, [appendLog, createConnectorCallbacks]);
 
   const disconnectTikTok = useCallback(async () => {
@@ -2239,6 +2377,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       testServerNeuralPlayback,
       updateTikTokConfig,
       attemptTikTokConnect,
+      reconnectTikTok,
+      checkRelayHealth,
       disconnectTikTok,
       recoveryGap,
       dismissRecoveryGap,
@@ -2298,6 +2438,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       testServerNeuralPlayback,
       updateTikTokConfig,
       attemptTikTokConnect,
+      reconnectTikTok,
+      checkRelayHealth,
       disconnectTikTok,
       recoveryGap,
       dismissRecoveryGap,

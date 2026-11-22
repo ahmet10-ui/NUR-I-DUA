@@ -9,6 +9,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NurIDuaTtsPlugin.class);
         registerPlugin(SeslenLocalTtsPlugin.class);
         registerPlugin(EmaLightningTtsPlugin.class);
+        registerPlugin(ZerreTtsPlugin.class);
         registerPlugin(NurIDuaAudioPlugin.class);
         super.onCreate(savedInstanceState);
     }

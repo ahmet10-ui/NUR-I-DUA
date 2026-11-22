@@ -3,6 +3,7 @@ import {
   TikTokConnectionConfig,
   TikTokConnectionState,
   TikTokConnectorStatusPayload,
+  TikTokLastEventSummary,
   TikTokRecoveryGapInfo,
   TikTokRelayFollowPayload,
   TikTokRelayGiftPayload,
@@ -29,16 +30,27 @@ export interface TikTokServiceOptions {
 export interface RawGiftInput extends Partial<TikTokRelayGiftPayload> {
   uniqueId?: string;
   groupId?: string;
+  transactionId?: string;
   user?: {
+    id?: string | number;
+    displayId?: string;
     uniqueId?: string;
     nickname?: string;
     userId?: string | number;
+  };
+  gift?: {
+    id?: string | number;
+    name?: string;
+    type?: number;
+    diamondCount?: number;
   };
 }
 
 export interface RawFollowInput extends Partial<TikTokRelayFollowPayload> {
   uniqueId?: string;
   user?: {
+    id?: string | number;
+    displayId?: string;
     uniqueId?: string;
     nickname?: string;
     userId?: string | number;
@@ -156,6 +168,8 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
   private status: TikTokConnectionState = 'unconfigured';
   private roomId: string | null = null;
   private viewerCount: number | null = null;
+  private followerCount: number | null = null;
+  private lastEvent: TikTokLastEventSummary | null = null;
   private eventSource: EventSource | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stableConnectionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -171,6 +185,7 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
   private activeStreakKeys = new Map<string, string>();
   private finalizedStreakKeys = new Map<string, number>();
   private finalizedGiftEventIds = new Map<string, number>();
+  private finalizedTransactionIds = new Map<string, number>();
   private seenSseEventIds = new Map<string, number>();
   private seenFollowKeys = new Map<string, number>();
   private seenFollowEventIds = new Map<string, number>();
@@ -268,17 +283,26 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
   private emitStatus(
     nextState: TikTokConnectionState,
     error: string | null = null,
-    meta?: { roomId?: string | null; viewerCount?: number | null }
+    meta?: {
+      roomId?: string | null;
+      viewerCount?: number | null;
+      followerCount?: number | null;
+      lastEvent?: TikTokLastEventSummary | null;
+    }
   ): void {
     this.status = nextState;
     if (meta?.roomId !== undefined) this.roomId = meta.roomId;
     if (meta?.viewerCount !== undefined) this.viewerCount = meta.viewerCount;
+    if (meta?.followerCount !== undefined) this.followerCount = meta.followerCount;
+    if (meta?.lastEvent !== undefined) this.lastEvent = meta.lastEvent;
 
     this.callbacks.onStatusChange?.({
       state: nextState,
       username: sanitizeTikTokHandle(this.config.username) || 'fcproplayer7',
       roomId: this.roomId,
       viewerCount: this.viewerCount,
+      followerCount: this.followerCount,
+      lastEvent: this.lastEvent,
       error,
       updatedAt: new Date().toISOString(),
     });
@@ -343,10 +367,16 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     if (explicitEventId && this.finalizedGiftEventIds.has(explicitEventId)) {
       return;
     }
+    if (gift.transactionId && this.finalizedTransactionIds.has(gift.transactionId)) {
+      return;
+    }
     const now = Date.now();
     this.finalizedStreakKeys.set(gift.streakKey, now);
     if (explicitEventId) {
       this.finalizedGiftEventIds.set(explicitEventId, now);
+    }
+    if (gift.transactionId) {
+      this.finalizedTransactionIds.set(gift.transactionId, now);
     }
     this.pruneFinalizedCache();
     this.callbacks.onFinalizedGift?.(gift);
@@ -387,12 +417,13 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     const cleanUser = sanitizeUsername(
       raw.username ||
         raw.uniqueId ||
+        raw.user?.displayId ||
         raw.user?.uniqueId ||
         raw.nickname ||
         raw.user?.nickname ||
         'tiktok_takipci'
     );
-    const rawUid = raw.userId ?? raw.user?.userId;
+    const rawUid = raw.userId ?? raw.user?.id ?? raw.user?.userId;
     const cleanUserId =
       rawUid !== undefined && rawUid !== null && String(rawUid).trim()
         ? String(rawUid).trim().slice(0, 64)
@@ -465,27 +496,37 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     const cleanUser = sanitizeUsername(
       raw.username ||
         raw.uniqueId ||
+        raw.user?.displayId ||
         raw.user?.uniqueId ||
         raw.nickname ||
         raw.user?.nickname ||
         'tiktok_izleyici'
     );
-    const rawUid = raw.userId ?? raw.user?.userId;
+    const rawUid = raw.userId ?? raw.user?.id ?? raw.user?.userId;
     const cleanUserId =
       rawUid !== undefined && rawUid !== null && String(rawUid).trim()
         ? String(rawUid).trim().slice(0, 64)
         : undefined;
-    const cleanGiftName = sanitizeGiftName(raw.giftName || 'Hediye');
-    const cleanGiftId = String(raw.giftId || cleanGiftName.toLowerCase()).slice(0, 64);
+    const cleanGiftName = sanitizeGiftName(raw.giftName || raw.gift?.name || 'Hediye');
+    const cleanGiftId = String(raw.giftId || raw.gift?.id || cleanGiftName.toLowerCase()).slice(0, 64);
     const qty = Math.max(
       1,
       Math.min(999, Math.floor(Number(raw.repeatCount ?? raw.quantity ?? 1) || 1))
     );
 
-    const giftType = typeof raw.giftType === 'number' ? raw.giftType : undefined;
+    const rawGiftType = raw.giftType ?? raw.gift?.type;
+    const giftType = typeof rawGiftType === 'number' ? rawGiftType : undefined;
     const repeatEnd = raw.repeatEnd;
     const isStreakable = giftType === 1;
     const isStreakInProgress = isStreakable && repeatEnd !== true;
+
+    const cleanTransactionId =
+      raw.transactionId !== undefined && raw.transactionId !== null && String(raw.transactionId).trim()
+        ? String(raw.transactionId).trim().slice(0, 96)
+        : undefined;
+    if (!isStreakInProgress && cleanTransactionId && this.finalizedTransactionIds.has(cleanTransactionId)) {
+      return { accepted: false, buffered: false };
+    }
 
     const explicitEventId =
       raw.eventId !== undefined && raw.eventId !== null && String(raw.eventId).trim()
@@ -529,7 +570,7 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     }
 
     const rawUnit = Number(raw.unitCoins);
-    const rawDiamond = Number(raw.diamondCount);
+    const rawDiamond = Number(raw.diamondCount ?? raw.gift?.diamondCount);
     const resolvedUnitCoins =
       Number.isFinite(rawUnit) && rawUnit > 0
         ? rawUnit
@@ -538,8 +579,12 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         : undefined;
 
     const normalized: TikTokRelayGiftPayload = {
-      eventId: String(raw.eventId || `tk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`),
+      eventId: String(
+        raw.eventId || cleanTransactionId || `tk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+      ),
       sseEventId: raw.sseEventId,
+      transactionId: cleanTransactionId,
+      groupId: raw.groupId ? String(raw.groupId) : undefined,
       isSimulated: raw.isSimulated,
       replayed: raw.replayed,
       streakKey,
@@ -756,6 +801,8 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
           this.emitStatus(nextState, data.error || null, {
             roomId: data.roomId ?? null,
             viewerCount: typeof data.viewerCount === 'number' ? data.viewerCount : null,
+            followerCount: typeof data.followerCount === 'number' ? data.followerCount : undefined,
+            lastEvent: data.lastEvent ?? undefined,
           });
 
           // Controlled reconnect when an active TikTok stream drops/ends cleanly via status event
@@ -982,6 +1029,94 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
       this.emitStatus('error', msg, { roomId: null, viewerCount: null });
       return { ok: false, error: msg };
     }
+  }
+
+  async checkHealth(explicitEndpoint?: string): Promise<{
+    ok: boolean;
+    latencyMs: number;
+    url: string;
+    service?: string;
+    connectorVersion?: string;
+    simulationEnabled?: boolean;
+    hasSignApiKey?: boolean;
+    endpoints?: string[];
+    error?: string;
+  }> {
+    const baseUrl = normalizeRelayBaseUrl(explicitEndpoint ?? this.config.connectorEndpoint);
+    if (!baseUrl) {
+      return {
+        ok: false,
+        latencyMs: 0,
+        url: '',
+        error: 'Relay URL boş; sağlık testi için https://... adresini girin.',
+      };
+    }
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      return {
+        ok: false,
+        latencyMs: 0,
+        url: baseUrl,
+        error: 'Relay URL http:// veya https:// ile başlamalıdır.',
+      };
+    }
+
+    const healthUrl = `${baseUrl}/health`;
+    const started = performance.now();
+    try {
+      const controller = new AbortController();
+      const timeout = globalThis.setTimeout(() => controller.abort(), 12_000);
+      const res = await fetch(healthUrl, {
+        method: 'GET',
+        mode: 'cors',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      globalThis.clearTimeout(timeout);
+      const latencyMs = Math.round(performance.now() - started);
+      const json = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        service?: string;
+        connectorVersion?: string;
+        simulationEnabled?: boolean;
+        hasSignApiKey?: boolean;
+        endpoints?: string[];
+        error?: string;
+      };
+      if (!res.ok || !json.ok) {
+        return {
+          ok: false,
+          latencyMs,
+          url: healthUrl,
+          error: json.error || `HTTP ${res.status}`,
+        };
+      }
+      return {
+        ok: true,
+        latencyMs,
+        url: healthUrl,
+        service: json.service,
+        connectorVersion: json.connectorVersion,
+        simulationEnabled: json.simulationEnabled,
+        hasSignApiKey: json.hasSignApiKey,
+        endpoints: json.endpoints,
+      };
+    } catch (err) {
+      const latencyMs = Math.round(performance.now() - started);
+      return {
+        ok: false,
+        latencyMs,
+        url: healthUrl,
+        error: err instanceof Error ? err.message : 'Relay sağlık kontrolü başarısız.',
+      };
+    }
+  }
+
+  async reconnect(username?: string): Promise<{ ok: boolean; error?: string }> {
+    const cleanHandle =
+      sanitizeTikTokHandle(username || this.config.username || this.activeHandle) || 'fcproplayer7';
+    await this.disconnect();
+    return this.connect(cleanHandle);
   }
 
   async disconnect(): Promise<void> {

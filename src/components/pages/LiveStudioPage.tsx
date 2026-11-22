@@ -22,7 +22,9 @@ export const LiveStudioPage: React.FC<LiveStudioPageProps> = ({ onOpenStandalone
   const [copied, setCopied] = useState(false);
 
   const broadcastUrl =
-    typeof window !== 'undefined' ? `${window.location.origin}/?view=broadcast` : '/?view=broadcast';
+    typeof window !== 'undefined'
+      ? `${window.location.origin}/?view=broadcast&obs=1`
+      : '/?view=broadcast&obs=1';
 
   const handleCopy = () => {
     navigator.clipboard?.writeText(broadcastUrl);

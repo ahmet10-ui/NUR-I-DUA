@@ -12,10 +12,22 @@ Bu klasör, Render gibi ücretsiz bir Node.js ortamında `process.env.PORT` ve `
 
 ## Uç Noktalar
 
-- `GET /` ve `GET /health` — Sunucu sağlık kontrolü
+- `GET /` ve `GET /health` — Sunucu sağlık kontrolü (`200 OK`, gecikme ve `simulationEnabled` bilgisi)
+- `GET /status?username=fcproplayer7` — Anlık oturum durumu (`state`, `roomId`, `viewerCount`, `followerCount`, `lastEvent`, `lastError`)
 - `POST /connect` — `{ "username": "fcproplayer7" }` ile canlı yayına bağlanır
+- `POST /reconnect` — `{ "username": "fcproplayer7" }` ile mevcut oturumu sıfırlayıp yeniden bağlanır
 - `POST /disconnect` — Aktif yayından ayrılır
-- `GET /events?username=fcproplayer7` — `status` ve `gift` olaylarını SSE olarak yayınlar
+- `GET /events?username=fcproplayer7` — `status`, `gift`, `follow` ve `recovery_gap` olaylarını SSE olarak yayınlar
+
+## Gereksinimler ve Ortam Değişkenleri
+
+- **Node.js `>=20.0.0`** (`tiktok-live-connector@2.5.0` için zorunludur)
+- `TIKTOK_USERNAME=fcproplayer7` (varsayılan yayıncı kullanıcı adı)
+- `SIMULATION_ENABLED=false` (varsayılan olarak kapalıdır)
+- `SIGN_API_KEY=...` *(İsteğe bağlı)* — EulerStream WebCast imza servisi anahtarı (`SignConfig`)
+- `SIGN_SERVER_URL=...` *(İsteğe bağlı)* — Kendi kendini barındıran harici imzalama servisi URL'i (`RouteConfig.fetchSignedWebSocketFromProvider`)
+
+> **Not:** TikTok LIVE şifre, çerez veya özel hesap kimliği istenmez ve saklanmaz. EulerStream Business/Enterprise planı gerektiren kısıtlamalarda relay sunucusu bunu sahte başarı olarak maskelemez; açık hata mesajı döndürür.
 
 ## Yerel Çalıştırma
 
@@ -30,9 +42,9 @@ npm start
 1. `relay-server/` klasörünü (içindeki `package.json`, `server.mjs`, `.gitignore`, `README.md` dosyalarıyla; `node_modules/` hariç) GitHub deponuza aktarın.
 2. Render'da **New > Web Service** oluşturup GitHub deponuzu seçin.
 3. **Root Directory:** `relay-server`
-4. **Runtime:** `Node`
+4. **Runtime:** `Node` (Node 20+)
 5. **Build Command:** `npm install`
 6. **Start Command:** `npm start`
-7. (İsteğe bağlı) Environment Variable: `TIKTOK_USERNAME=fcproplayer7`
+7. Ortam değişkenleri: `TIKTOK_USERNAME=fcproplayer7`, `SIMULATION_ENABLED=false`, varsa `SIGN_API_KEY`
 8. Health Check Path: `/health`
-9. Oluşan `https://...onrender.com` adresini NUR-I DUA uygulamasındaki **TikTok Connection > External Node.js Relay Base URL** alanına girip `@fcproplayer7` ile **Verify & Connect** butonuna basın.
+9. Oluşan `https://...onrender.com` adresini NUR-I DUA uygulamasındaki **TikTok Connection > External Node.js Relay Base URL** alanına girip **Relay Sağlık Testi** ve `@fcproplayer7` ile bağlanın.

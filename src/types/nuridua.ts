@@ -198,10 +198,13 @@ export interface VoiceSettingsConfig {
   scholar1Rate: number;
   scholar1Pitch: number;
   seslenHasanRate?: number;
-  scholar1Engine?: 'seslen_hasan' | 'ema_lightning';
+  scholar1Engine?: 'seslen_hasan' | 'ema_lightning' | 'zerre_ses_a';
   emaLightningRate?: number;
   emaLightningFallbackToHasan?: boolean;
   emaLightningApproved?: boolean;
+  zerreSesARate?: number;
+  zerreSesAFallbackToHasan?: boolean;
+  zerreSesAApproved?: boolean;
 }
 
 export type TikTokConnectionState =
@@ -210,6 +213,16 @@ export type TikTokConnectionState =
   | 'connecting'
   | 'connected'
   | 'error';
+
+export interface TikTokLastEventSummary {
+  kind: 'gift' | 'follow' | 'status' | 'error';
+  username?: string;
+  displayUsername?: string;
+  summary: string;
+  coins?: number;
+  timestamp: string;
+  eventId?: string;
+}
 
 export interface TikTokConnectionConfig {
   username: string;
@@ -223,11 +236,15 @@ export interface TikTokConnectionConfig {
   lastCheckedAt: string | null;
   roomId?: string | null;
   viewerCount?: number | null;
+  followerCount?: number | null;
+  lastEvent?: TikTokLastEventSummary | null;
 }
 
 export interface TikTokRelayGiftPayload {
   eventId: string;
   sseEventId?: string;
+  transactionId?: string;
+  groupId?: string;
   isSimulated?: boolean;
   replayed?: boolean;
   streakKey: string;
@@ -280,6 +297,9 @@ export interface TikTokConnectorStatusPayload {
   username: string;
   roomId?: string | null;
   viewerCount?: number | null;
+  followerCount?: number | null;
+  lastEvent?: TikTokLastEventSummary | null;
+  lastErrorCategory?: string | null;
   error?: string | null;
   sseEventId?: string;
   instanceId?: string;
@@ -322,6 +342,8 @@ export interface StudioStats {
   totalPrayers: number;
   simulatedGifts: number;
   realGifts: number;
+  realFollowers?: number;
+  simulatedFollowers?: number;
 }
 
 export interface AppState {
@@ -358,8 +380,10 @@ export interface IScholarCharacterRig {
 
 export interface TTSSpeakOptions {
   scholarId?: ScholarId;
-  scholar1Engine?: 'seslen_hasan' | 'ema_lightning';
+  scholar1Engine?: 'seslen_hasan' | 'ema_lightning' | 'zerre_ses_a';
   emaFallbackToHasan?: boolean;
+  zerreFallbackToHasan?: boolean;
+  zerreApproved?: boolean;
   forceStandardSystemTts?: boolean;
   preferredEngine?: TTSProviderType;
   voiceURI?: string;

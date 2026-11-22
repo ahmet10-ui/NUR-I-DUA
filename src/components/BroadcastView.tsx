@@ -27,21 +27,27 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
     <div
       className={
         standalone
-          ? 'w-screen h-screen bg-[#090706] flex items-center justify-center overflow-hidden'
+          ? 'fixed inset-0 bg-[#090706] flex items-center justify-center overflow-hidden'
           : 'w-full h-full flex items-center justify-center'
       }
     >
       {/* 1080x1920 (9:16) Vertical Broadcast Frame */}
       <div
-        className="relative w-full h-full max-h-full aspect-[9/16] bg-[#0B0908] overflow-hidden shadow-2xl border border-[#C9A45C]/30"
-        style={{ maxWidth: standalone ? 'calc(100vh * 9 / 16)' : undefined }}
+        data-testid="broadcast-frame-9-16"
+        className={`relative aspect-[9/16] bg-[#0B0908] overflow-hidden shadow-2xl border border-[#C9A45C]/30 ${
+          standalone
+            ? 'w-[min(100vw,calc(100dvh*9/16))] h-[min(100dvh,calc(100vw*16/9))]'
+            : 'w-full h-full max-h-full'
+        }`}
       >
-        {/* 3D Ottoman Mosque & Two Animated Scholars (Unobstructed Central Focus) */}
-        <MosqueViewport cameraPreset={broadcast.cameraPreset} className="absolute inset-0" />
+        {/* 3D Ottoman Mosque & Two Animated Scholars (Absolute Layer 0 — never pushes flow) */}
+        <div className="absolute inset-0 z-0 overflow-hidden">
+          <MosqueViewport cameraPreset={broadcast.cameraPreset} className="absolute inset-0" />
+        </div>
 
         {/* Subtle Edge Scrims */}
         <div
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-28"
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-28"
           style={{
             background:
               'linear-gradient(0deg, rgba(12,9,7,0.86) 0%, rgba(12,9,7,0.38) 58%, rgba(12,9,7,0) 100%)',
@@ -49,18 +55,23 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
         />
 
         {/* Delicate Gold Corner Filigree */}
-        <div className="pointer-events-none absolute inset-2 border border-[#C9A45C]/15" />
-        <div className="pointer-events-none absolute top-2 left-2 w-3.5 h-3.5 border-t-2 border-l-2 border-[#E5C88B]/60" />
-        <div className="pointer-events-none absolute top-2 right-2 w-3.5 h-3.5 border-t-2 border-r-2 border-[#E5C88B]/60" />
-        <div className="pointer-events-none absolute bottom-2 left-2 w-3.5 h-3.5 border-b-2 border-l-2 border-[#E5C88B]/60" />
-        <div className="pointer-events-none absolute bottom-2 right-2 w-3.5 h-3.5 border-b-2 border-r-2 border-[#E5C88B]/60" />
+        <div className="pointer-events-none absolute inset-2 z-10 border border-[#C9A45C]/15" />
+        <div className="pointer-events-none absolute top-2 left-2 z-10 w-3.5 h-3.5 border-t-2 border-l-2 border-[#E5C88B]/60" />
+        <div className="pointer-events-none absolute top-2 right-2 z-10 w-3.5 h-3.5 border-t-2 border-r-2 border-[#E5C88B]/60" />
+        <div className="pointer-events-none absolute bottom-2 left-2 z-10 w-3.5 h-3.5 border-b-2 border-l-2 border-[#E5C88B]/60" />
+        <div className="pointer-events-none absolute bottom-2 right-2 z-10 w-3.5 h-3.5 border-b-2 border-r-2 border-[#E5C88B]/60" />
 
-        {/* Fixed Compact Top Coin-Tier Bar (Dark Black-Brown + Subtle Gold Accent) */}
+        {/* Fixed Compact Top Coin-Tier Bar (Pinned Top Overlay z-30 · Never Clipped Off-Screen) */}
         <header
           data-testid="broadcast-top-tier-bar"
-          className="relative z-20 w-full bg-[#120D0A]/94 border-b border-[#C9A45C]/45 shadow-md"
+          className="absolute top-0 inset-x-0 z-30 w-full bg-[#120D0A]/94 border-b border-[#C9A45C]/50 shadow-md"
+          style={
+            standalone
+              ? { paddingTop: 'env(safe-area-inset-top, 0px)' }
+              : undefined
+          }
         >
-          <div className="px-3 pt-1.5 pb-1 flex items-center justify-center">
+          <div className="px-3 pt-1 pb-0.5 flex items-center justify-center">
             <span className="font-display text-[10px] tracking-[0.22em] font-semibold text-[#E5C88B]/90 uppercase truncate">
               {brandTitle}
             </span>
@@ -82,11 +93,7 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                       : 'bg-[#1A120D]/95 border-[#C9A45C]/30'
                   }`}
                 >
-                  <p
-                    className={`text-[10px] sm:text-[11px] font-bold leading-tight text-[#F3D999] ${
-                      item.nowrapRange ? 'whitespace-nowrap' : 'whitespace-nowrap'
-                    }`}
-                  >
+                  <p className="text-[10px] sm:text-[11px] font-bold leading-tight text-[#F3D999] whitespace-nowrap">
                     {item.range}
                   </p>
                   <p className="mt-0.5 text-[8.5px] sm:text-[9.5px] leading-tight text-[#F6F0E4] truncate">
@@ -99,7 +106,7 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
         </header>
 
         {/* Bottom Safe Zone: Compact Prayer Notification Card (Only When Audio Actually Starts) */}
-        <div className="absolute inset-x-0 bottom-3 z-20 px-3 flex flex-col items-center gap-1.5 pointer-events-none">
+        <div className="absolute inset-x-0 bottom-3 z-30 px-3 flex flex-col items-center gap-1.5 pointer-events-none">
           {broadcast.showScholarNames && (
             <div className="w-full flex items-center justify-between px-1 text-[10px]">
               <div

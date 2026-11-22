@@ -79,8 +79,14 @@ export const MosqueViewport: React.FC<MosqueViewportProps> = ({
     });
   }, [activeScholar, isSpeaking]);
 
+  const hasExplicitPosition = /\b(absolute|fixed|sticky|static)\b/.test(className);
+
   return (
-    <div className={`relative w-full h-full overflow-hidden bg-[#070E21] ${className}`}>
+    <div
+      className={`${
+        hasExplicitPosition ? '' : 'relative'
+      } w-full h-full overflow-hidden bg-[#070E21] ${className}`.trim()}
+    >
       <div ref={mountRef} className="w-full h-full" />
       {useStaticFallback && (
         <div className="absolute inset-0 overflow-hidden bg-[#09122A]">

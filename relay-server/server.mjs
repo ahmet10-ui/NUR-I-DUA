@@ -1,6 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath, URL, URLSearchParams } from 'node:url';
+import { configureTikTokConnectorRoutes, resolveSignerConfiguration } from './signingProvider.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const DEFAULT_PORT = Number(process.env.PORT || 8080);
@@ -171,20 +172,34 @@ export function createRelayServer(options = {}) {
     200,
     Number(options.streakGarbageCollectMs ?? DEFAULT_STREAK_GC_MS) || DEFAULT_STREAK_GC_MS
   );
+  const serverEnv = options.env || process.env;
+  const signerSummary = resolveSignerConfiguration(serverEnv);
   const simulationEnabled =
     options.simulationEnabled !== undefined
       ? Boolean(options.simulationEnabled)
-      : process.env.SIMULATION_ENABLED === 'true';
+      : serverEnv.SIMULATION_ENABLED === 'true';
   const relayInstanceId =
     options.instanceId ||
     `rly_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
   function classifyTikTokError(rawMessage) {
     const msg = String(rawMessage || '');
-    if (/business\s*plan|enterprise|sign\s*api|403|401|unauthorized|forbidden|captcha|rate\s*limit|euler/i.test(msg)) {
+    if (/business\s*plan|enterprise|fetchWebcastSignatureFromEulerRoute/i.test(msg)) {
       return {
         category: 'euler_business_plan_required',
-        hint: 'EulerStream imzalama kotası/yetkisi veya Business Plan kısıtı algılandı (SIGN_API_KEY veya SIGN_SERVER_URL gerekebilir).',
+        hint: 'EulerStream Business Plan kısıtı algılandı. Ücretli Business plan yerine harici imzalama servisi veya doğrudan gift/list rotası kullanılmalıdır.',
+      };
+    }
+    if (/fetchSignedWebSocketFromProvider|fetchWebcastSignatureFromProvider|Harici (?:WS|HTTP) imzalama|Empty Cookies|Empty Payload/i.test(msg)) {
+      return {
+        category: 'custom_signer_error',
+        hint: 'İmzalama sağlayıcısı geçerli bir imza, protobuf yükü veya çerez döndürmedi.',
+      };
+    }
+    if (/sign\s*api|403|401|unauthorized|forbidden|captcha|rate\s*limit|euler/i.test(msg)) {
+      return {
+        category: 'euler_business_plan_required',
+        hint: 'İmzalama kotası/yetkisi veya erişim kısıtı algılandı.',
       };
     }
     if (/timed?\s*out|timeout|econnrefused|enotfound|fetch failed|cors|network|aborterror/i.test(msg)) {
@@ -193,7 +208,7 @@ export function createRelayServer(options = {}) {
         hint: 'İmzalama/WebCast sunucusu zaman aşımı veya ağ erişim hatası.',
       };
     }
-    if (/offline|not found|isn't live|live.*ended|user.*offline|room.*not/i.test(msg)) {
+    if (/offline|not found|isn't\s+(?:live|online)|not\s+online|live.*ended|user.*offline|room.*not/i.test(msg)) {
       return {
         category: 'stream_offline',
         hint: 'Yayın şu anda çevrimdışı veya canlı oda bulunamadı.',
@@ -205,7 +220,6 @@ export function createRelayServer(options = {}) {
     };
   }
 
-  let configuredSignHook = false;
   const connectionFactory =
     options.connectionFactory ||
     (async (username) => {
@@ -215,55 +229,14 @@ export function createRelayServer(options = {}) {
         throw new Error('tiktok-live-connector içinde TikTokLiveConnection bulunamadı.');
       }
 
-      const customSignUrl = String(process.env.SIGN_SERVER_URL || '').trim().replace(/\/+$/, '');
-      if (customSignUrl && !configuredSignHook && mod.RouteConfig && typeof mod.deserializeMessage === 'function') {
-        configuredSignHook = true;
-        mod.RouteConfig.fetchSignedWebSocketFromProvider = async ({
-          roomId,
-          cursor,
-          useMobile,
-        }) => {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 15_000);
-          try {
-            const targetUrl = new URL(customSignUrl);
-            targetUrl.searchParams.set('roomId', String(roomId || ''));
-            if (cursor) targetUrl.searchParams.set('cursor', String(cursor));
-            targetUrl.searchParams.set('useMobile', useMobile ? 'true' : 'false');
-            const resp = await fetch(targetUrl.toString(), {
-              method: 'GET',
-              headers: { Accept: 'application/json' },
-              signal: controller.signal,
-            });
-            if (!resp.ok) {
-              throw new Error(`SIGN_SERVER_URL HTTP ${resp.status}`);
-            }
-            const json = await resp.json();
-            const b64 = json?.signedWebSocketBase64 || json?.fetchResultBase64 || json?.data;
-            if (!b64 || typeof b64 !== 'string') {
-              throw new Error('SIGN_SERVER_URL geçerli signedWebSocketBase64 yanıtı döndürmedi.');
-            }
-            const fetchResult = mod.deserializeMessage(
-              'ProtoMessageFetchResult',
-              Buffer.from(b64, 'base64')
-            );
-            return {
-              fetchResult,
-              fetchResultCookieHeader: json?.cookieHeader || undefined,
-              fetchResultRoomId: json?.roomId ? String(json.roomId) : roomId,
-            };
-          } finally {
-            clearTimeout(timer);
-          }
-        };
-      }
+      const activeSigner = configureTikTokConnectorRoutes(mod, serverEnv);
 
       const connOptions = {
         processInitialData: false,
         enableExtendedGiftInfo: true,
       };
-      if (process.env.SIGN_API_KEY && String(process.env.SIGN_API_KEY).trim()) {
-        connOptions.signApiKey = String(process.env.SIGN_API_KEY).trim();
+      if (!activeSigner.disableEuler && serverEnv.SIGN_API_KEY && String(serverEnv.SIGN_API_KEY).trim()) {
+        connOptions.signApiKey = String(serverEnv.SIGN_API_KEY).trim();
       }
       return new ConnectionCtor(username, connOptions);
     });
@@ -390,7 +363,7 @@ export function createRelayServer(options = {}) {
   }
 
   function handleRawTikTokGift(session, data) {
-    const rawUserId = data?.userId ?? data?.user?.userId ?? data?.user?.id;
+    const rawUserId = data?.userId ?? data?.user?.idStr ?? data?.user?.userId ?? data?.user?.id;
     const userId =
       rawUserId !== undefined && rawUserId !== null && String(rawUserId).trim()
         ? sanitizeDisplayText(String(rawUserId), '')
@@ -651,7 +624,7 @@ export function createRelayServer(options = {}) {
   }
 
   function handleRawTikTokFollow(session, data, rawEventType) {
-    const rawUserId = data?.userId ?? data?.user?.userId ?? data?.user?.id;
+    const rawUserId = data?.userId ?? data?.user?.idStr ?? data?.user?.userId ?? data?.user?.id;
     const userId =
       rawUserId !== undefined && rawUserId !== null && String(rawUserId).trim()
         ? sanitizeDisplayText(String(rawUserId), '')
@@ -796,7 +769,7 @@ export function createRelayServer(options = {}) {
       const giftDetails = event?.giftDetails || {};
       handleRawTikTokGift(session, {
         ...event,
-        userId: event?.userId ?? user.id ?? user.userId,
+        userId: event?.userId ?? user.idStr ?? user.id ?? user.userId,
         uniqueId: event?.uniqueId ?? user.displayId ?? user.uniqueId,
         nickname: event?.nickname ?? user.nickname,
         giftId: event?.giftId ?? gift.id ?? gift.gift_id ?? giftDetails.id,
@@ -823,7 +796,7 @@ export function createRelayServer(options = {}) {
         session,
         {
           ...event,
-          userId: event?.userId ?? user.id ?? user.userId,
+          userId: event?.userId ?? user.idStr ?? user.id ?? user.userId,
           uniqueId: event?.uniqueId ?? user.displayId ?? user.uniqueId,
           nickname: event?.nickname ?? user.nickname,
           msgId: event?.msgId ?? event?.common?.msgId,
@@ -839,7 +812,7 @@ export function createRelayServer(options = {}) {
           session,
           {
             ...event,
-            userId: event?.userId ?? user.id ?? user.userId,
+            userId: event?.userId ?? user.idStr ?? user.id ?? user.userId,
             uniqueId: event?.uniqueId ?? user.displayId ?? user.uniqueId,
             nickname: event?.nickname ?? user.nickname,
             msgId: event?.msgId ?? event?.common?.msgId,
@@ -1110,8 +1083,13 @@ export function createRelayServer(options = {}) {
         connectedSessions: active,
         ringBufferSize,
         simulationEnabled,
-        hasSignApiKey: Boolean(process.env.SIGN_API_KEY && String(process.env.SIGN_API_KEY).trim()),
-        hasSignServerUrl: Boolean(process.env.SIGN_SERVER_URL && String(process.env.SIGN_SERVER_URL).trim()),
+        signerMode: signerSummary.signerMode,
+        hasSignApiKey: signerSummary.hasSignApiKey,
+        hasSignServerUrl: signerSummary.hasSignServerUrl,
+        hasCustomWsSigner: signerSummary.hasCustomWsSigner,
+        hasCustomHttpSigner: signerSummary.hasCustomHttpSigner,
+        eulerFallbackDisabled: signerSummary.eulerFallbackDisabled,
+        eulerBusinessEndpointBlocked: signerSummary.eulerBusinessEndpointBlocked,
         endpoints,
         timestamp: new Date().toISOString(),
       });
@@ -1133,6 +1111,10 @@ export function createRelayServer(options = {}) {
         lastErrorCategory: session ? session.lastErrorCategory : null,
         instanceId: relayInstanceId,
         simulationEnabled,
+        signerMode: signerSummary.signerMode,
+        hasCustomWsSigner: signerSummary.hasCustomWsSigner,
+        hasCustomHttpSigner: signerSummary.hasCustomHttpSigner,
+        eulerBusinessEndpointBlocked: signerSummary.eulerBusinessEndpointBlocked,
         connectorVersion: '2.5.0',
         updatedAt: new Date().toISOString(),
       });

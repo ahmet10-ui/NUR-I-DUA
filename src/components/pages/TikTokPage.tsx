@@ -58,7 +58,11 @@ export const TikTokPage: React.FC = () => {
     service?: string;
     connectorVersion?: string;
     simulationEnabled?: boolean;
+    signerMode?: string;
     hasSignApiKey?: boolean;
+    hasCustomWsSigner?: boolean;
+    hasCustomHttpSigner?: boolean;
+    eulerBusinessEndpointBlocked?: boolean;
     endpoints?: string[];
     error?: string;
   } | null>(null);
@@ -354,8 +358,8 @@ export const TikTokPage: React.FC = () => {
               {healthResult.ok ? (
                 <p className="text-[11px] text-emerald-100/90 font-mono">
                   v{healthResult.connectorVersion || '2.5.0'} · Simulation:{' '}
-                  {String(Boolean(healthResult.simulationEnabled))} · SignKey:{' '}
-                  {String(Boolean(healthResult.hasSignApiKey))}
+                  {String(Boolean(healthResult.simulationEnabled))} · Signer:{' '}
+                  {healthResult.signerMode || 'default'}
                 </p>
               ) : (
                 <p className="text-[11px]">{healthResult.error}</p>

@@ -24,10 +24,14 @@ Bu klasör, Render gibi ücretsiz bir Node.js ortamında `process.env.PORT` ve `
 - **Node.js `>=20.0.0`** (`tiktok-live-connector@2.5.0` için zorunludur)
 - `TIKTOK_USERNAME=fcproplayer7` (varsayılan yayıncı kullanıcı adı)
 - `SIMULATION_ENABLED=false` (varsayılan olarak kapalıdır)
-- `SIGN_API_KEY=...` *(İsteğe bağlı)* — EulerStream WebCast imza servisi anahtarı (`SignConfig`)
-- `SIGN_SERVER_URL=...` *(İsteğe bağlı)* — Kendi kendini barındıran harici imzalama servisi URL'i (`RouteConfig.fetchSignedWebSocketFromProvider`)
+- `WS_SIGN_SERVER_URL=...` *(İsteğe bağlı)* — Harici WebSocket imzalama/fetch servisi (`RouteConfig.fetchSignedWebSocketFromProvider`)
+- `HTTP_SIGN_SERVER_URL=...` *(İsteğe bağlı)* — Harici HTTP URL imzalama servisi (`RouteConfig.fetchWebcastSignatureFromProvider`)
+- `SIGN_SERVER_URL=...` *(İsteğe bağlı)* — Harici imzalama servisi ana adresi (`WS_SIGN_SERVER_URL` yerine kullanılabilir; `SIGN_SERVER_HTTP_ENABLED=true` ile `/sign` ucu da bağlanır)
+- `SIGN_SERVER_TOKEN=...` *(İsteğe bağlı)* — Yalnızca harici imzalama sunucusuna `Authorization: Bearer ...` / `x-api-key` olarak gönderilen sunucu tarafı gizli anahtarı
+- `DISABLE_EULER=false` *(İsteğe bağlı)* — `true` yapıldığında EulerStream'e giden tüm rotalar tamamen kapatılır
+- `SIGN_API_KEY=...` *(İsteğe bağlı)* — EulerStream ücretsiz/kota anahtarı (`SignConfig`)
 
-> **Not:** TikTok LIVE şifre, çerez veya özel hesap kimliği istenmez ve saklanmaz. EulerStream Business/Enterprise planı gerektiren kısıtlamalarda relay sunucusu bunu sahte başarı olarak maskelemez; açık hata mesajı döndürür.
+> **Not:** `tiktok-live-connector@2.5.0` içinde `enableExtendedGiftInfo: true` varsayılan olarak EulerStream'in Business plan gerektiren `/webcast/sign_url` (`fetchWebcastSignatureFromEulerRoute`) ucunu çağırıyordu. `signingProvider.mjs` bu ücretli ucu varsayılan olarak devre dışı bırakır ve hediye kataloğunu (`webcast/gift/list/`) doğrudan TikTok üzerinden (`HTTP_SIGN_SERVER_URL` yoksa imzasız, varsa harici HTTP imzalayıcıyla) alır. TikTok LIVE şifre, çerez veya özel hesap kimliği istenmez ve saklanmaz.
 
 ## Yerel Çalıştırma
 

@@ -1038,7 +1038,11 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     service?: string;
     connectorVersion?: string;
     simulationEnabled?: boolean;
+    signerMode?: string;
     hasSignApiKey?: boolean;
+    hasCustomWsSigner?: boolean;
+    hasCustomHttpSigner?: boolean;
+    eulerBusinessEndpointBlocked?: boolean;
     endpoints?: string[];
     error?: string;
   }> {
@@ -1079,7 +1083,11 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         service?: string;
         connectorVersion?: string;
         simulationEnabled?: boolean;
+        signerMode?: string;
         hasSignApiKey?: boolean;
+        hasCustomWsSigner?: boolean;
+        hasCustomHttpSigner?: boolean;
+        eulerBusinessEndpointBlocked?: boolean;
         endpoints?: string[];
         error?: string;
       };
@@ -1098,7 +1106,11 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         service: json.service,
         connectorVersion: json.connectorVersion,
         simulationEnabled: json.simulationEnabled,
+        signerMode: json.signerMode,
         hasSignApiKey: json.hasSignApiKey,
+        hasCustomWsSigner: json.hasCustomWsSigner,
+        hasCustomHttpSigner: json.hasCustomHttpSigner,
+        eulerBusinessEndpointBlocked: json.eulerBusinessEndpointBlocked,
         endpoints: json.endpoints,
       };
     } catch (err) {

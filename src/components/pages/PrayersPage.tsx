@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { PRAYER_CATEGORIES } from '../../data/defaults';
 import { useStudio } from '../../context/StudioContext';
+import { resolveTierRules } from '../../services/interactionClassifier';
 import { buildHighTierTurkishSpeech } from '../../services/stage2Flow';
 import { verifiedArabicAudioPlayer } from '../../services/ttsService';
 import {
@@ -77,6 +78,10 @@ export const PrayersPage: React.FC = () => {
   const [confirmDeleteHighId, setConfirmDeleteHighId] = useState<string | null>(null);
   const [playingPreviewId, setPlayingPreviewId] = useState<string | null>(null);
   const [highNotice, setHighNotice] = useState<string | null>(null);
+
+  const resolvedTiers = resolveTierRules(state.tierRules);
+  const midRangeText = `${resolvedTiers.midGiftMinCoins}–${resolvedTiers.midGiftMaxCoins}`;
+  const highRangeText = `${resolvedTiers.highGiftMinCoins}–${resolvedTiers.highGiftMaxCoins}`;
 
   const highDuas = state.highTierDuas || [];
   const midOpeningCount = useMemo(
@@ -265,7 +270,7 @@ export const PrayersPage: React.FC = () => {
             Turkish &amp; High-Tier Prayer Library
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            Manage Başlangıç Duaları (50–149 Jeton), personalized <code className="font-mono text-[#E5C88B]">{'{isim}'}</code> prayers, and source-verified High-Tier (150–299 Jeton) Arabic + Turkish family duas.
+            Manage Başlangıç Duaları ({midRangeText} Jeton), personalized <code className="font-mono text-[#E5C88B]">{'{isim}'}</code> prayers, and source-verified High-Tier ({highRangeText} Jeton) Arabic + Turkish family duas.
           </p>
         </div>
 
@@ -328,7 +333,7 @@ export const PrayersPage: React.FC = () => {
                 : 'bg-[#0B142B] text-[#E5C88B] border-[#1E3361] hover:border-[#C9A45C]/50'
             }`}
           >
-            Başlangıç Duaları · 50–149 Jeton ({midOpeningCount})
+            Başlangıç Duaları · {midRangeText} Jeton ({midOpeningCount})
           </button>
           <button
             type="button"
@@ -516,7 +521,7 @@ export const PrayersPage: React.FC = () => {
                     onChange={(e) => setHighActive(e.target.checked)}
                     className="accent-[#C9A45C] w-4 h-4"
                   />
-                  <span>150–299 Jeton havuzunda aktif</span>
+                  <span>{highRangeText} Jeton havuzunda aktif</span>
                 </label>
 
                 <div className="flex items-center gap-3">

@@ -56,8 +56,8 @@ test('Follower classification greets once with editable template and normalizes 
   assert.equal(disabledRes.reason, 'follower_disabled');
 });
 
-test('Small gift (1-49 coins) greets ONLY without prayer and respects enable toggle', () => {
-  for (const coins of [1, 15, 49]) {
+test('Small gift (1-10 coins) greets ONLY without prayer and respects enable toggle', () => {
+  for (const coins of [1, 5, 10]) {
     const res = classifyGiftInteraction({
       username: 'omer_faruk',
       unitCoins: coins,
@@ -79,10 +79,10 @@ test('Small gift (1-49 coins) greets ONLY without prayer and respects enable tog
   assert.equal(rejected.reason, 'tier_disabled');
 });
 
-test('Mid gift (50-149 coins) draws non-consecutively from Başlangıç Duaları pool', () => {
+test('Mid gift (11-35 coins) draws non-consecutively from Başlangıç Duaları pool', () => {
   const res = classifyGiftInteraction({
     username: 'zeynep_kaya',
-    unitCoins: 75,
+    unitCoins: 25,
     repeatCount: 1,
   });
   assert.equal(res.shouldEnqueue, true);
@@ -105,14 +105,14 @@ test('Mid gift (50-149 coins) draws non-consecutively from Başlangıç Duaları
 
   const disabledMid = resolveTierRules({ ...DEFAULT_TIER_RULES, midGiftEnabled: false });
   const rejected = classifyGiftInteraction(
-    { username: 'zeynep_kaya', unitCoins: 75, repeatCount: 1 },
+    { username: 'zeynep_kaya', unitCoins: 25, repeatCount: 1 },
     disabledMid
   );
   assert.equal(rejected.shouldEnqueue, false);
   assert.equal(rejected.reason, 'tier_disabled');
 });
 
-test('High gift (150-299 coins) verified Arabic audio files exist with matching SHA-256 and CC0 license', () => {
+test('High gift (36-199 coins) verified Arabic audio files exist with matching SHA-256 and CC0 license', () => {
   assert.ok(DEFAULT_HIGH_TIER_DUAS.length >= 2);
   const publicDir = path.resolve(process.cwd(), 'public');
 

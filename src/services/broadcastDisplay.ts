@@ -1,43 +1,64 @@
-import { InteractionTierId, QueueEvent } from '../types/nuridua';
+import { DEFAULT_TIER_RULES } from '../data/defaults';
+import { InteractionTierId, QueueEvent, TierRuleConfig } from '../types/nuridua';
+import { resolveTierRules } from './interactionClassifier';
 
 export interface TopTierBarItem {
   tier: Exclude<InteractionTierId, 'follower'>;
   range: string;
+  unitLabel: string;
   label: string;
   weight: number;
   nowrapRange: boolean;
 }
 
-export const TOP_TIER_BAR_ITEMS: readonly TopTierBarItem[] = [
-  {
-    tier: 'small_gift',
-    range: '1–49',
-    label: 'Selamlama',
-    weight: 0.85,
-    nowrapRange: false,
-  },
-  {
-    tier: 'mid_gift',
-    range: '50–149',
-    label: 'Açılış duası',
-    weight: 1.0,
-    nowrapRange: false,
-  },
-  {
-    tier: 'high_gift',
-    range: '150–299',
-    label: 'Kapsamlı dua',
-    weight: 1.5,
-    nowrapRange: true,
-  },
-  {
-    tier: 'yasin_300',
-    range: '300+',
-    label: 'Yâsîn',
-    weight: 0.85,
-    nowrapRange: false,
-  },
-] as const;
+export function buildTopTierBarItems(
+  tierRules?: Partial<TierRuleConfig> | null
+): TopTierBarItem[] {
+  const rules = resolveTierRules(tierRules);
+  const highRangeLabel =
+    rules.highGiftMinCoins === 36 && rules.highGiftMaxCoins === 199
+      ? '36–60 · 61–199'
+      : `${rules.highGiftMinCoins}–${rules.highGiftMaxCoins}`;
+
+  return [
+    {
+      tier: 'small_gift',
+      range: `${rules.smallGiftMinCoins}–${rules.smallGiftMaxCoins}`,
+      unitLabel: 'JETON',
+      label: 'Selamlama',
+      weight: 0.85,
+      nowrapRange: false,
+    },
+    {
+      tier: 'mid_gift',
+      range: `${rules.midGiftMinCoins}–${rules.midGiftMaxCoins}`,
+      unitLabel: 'JETON',
+      label: 'Açılış duası',
+      weight: 1.0,
+      nowrapRange: false,
+    },
+    {
+      tier: 'high_gift',
+      range: highRangeLabel,
+      unitLabel: 'JETON',
+      label: 'Kapsamlı dua',
+      weight: 1.5,
+      nowrapRange: true,
+    },
+    {
+      tier: 'yasin_300',
+      range: `${rules.yasinMinCoins}+`,
+      unitLabel: 'JETON',
+      label: 'Yâsîn',
+      weight: 0.85,
+      nowrapRange: false,
+    },
+  ];
+}
+
+export const TOP_TIER_BAR_ITEMS: readonly TopTierBarItem[] = buildTopTierBarItems(
+  DEFAULT_TIER_RULES
+);
 
 export const TOP_TIER_BAR_GRID_COLUMNS = TOP_TIER_BAR_ITEMS.map((item) => `${item.weight}fr`).join(' ');
 
@@ -67,10 +88,10 @@ export function cleanNotificationUsername(
  * Rules:
  * - Never displays while idle, queued, or before playback actually starts (`hasPlaybackStarted === false`).
  * - Never displays Arabic text or Turkish meal.
- * - `small_gift` (1–49) and `follower`: greeting speech only; returns `null` (no prayer notification on screen).
- * - `mid_gift` (50–149): `"{Kullanıcı Adı} isimli kardeşimizin {Dua Adı} duası okunuyor."`
- * - `high_gift` (150–299): `"{Kullanıcı Adı} isimli kardeşimizin {Dua Adı} duası okunuyor."`
- * - `yasin_300` (300+): strictly `'Yâsîn-i Şerîf okunuyor'` with NO username.
+ * - `small_gift` (1–10) and `follower`: greeting speech only; returns `null` (no prayer notification on screen).
+ * - `mid_gift` (11–35): `"{Kullanıcı Adı} isimli kardeşimizin {Dua Adı} duası okunuyor."`
+ * - `high_gift` (36–199): `"{Kullanıcı Adı} isimli kardeşimizin {Dua Adı} duası okunuyor."`
+ * - `yasin_300` (200+): strictly `'Yâsîn-i Şerîf okunuyor'` with NO username.
  */
 export function formatBroadcastPrayerNotification(
   event: QueueEvent | null,

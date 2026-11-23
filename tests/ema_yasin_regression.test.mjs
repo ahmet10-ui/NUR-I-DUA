@@ -764,9 +764,9 @@ test('Test 17: Yasin queue lock stays true until done and new gifts do not preem
   assert.equal(handleRef.getPhase(), 'done');
 });
 
-// 18. 300, 600, 1000 coin finalized single gifts create strictly 1 Yasin event each
-test('Test 18: Single finalized gifts of 300, 600, and 1000 coins yield strictly eventCount === 1 yasin_300', () => {
-  for (const coins of [300, 600, 1000]) {
+// 18. 200, 300, 600, 1000 coin finalized single gifts create strictly 1 Yasin event each
+test('Test 18: Single finalized gifts of 200, 300, 600, and 1000 coins yield strictly eventCount === 1 yasin_300', () => {
+  for (const coins of [200, 300, 600, 1000]) {
     const res = classifyGiftInteraction(
       {
         unitCoins: coins,
@@ -784,14 +784,14 @@ test('Test 18: Single finalized gifts of 300, 600, and 1000 coins yield strictly
   }
 });
 
-// 19. Two independent 300-coin finalized gifts yield 2 separate yasin_300 events
-test('Test 19: Two independent 300-coin finalized gifts enqueue two separate Yasin events', () => {
+// 19. Two independent 200-coin finalized gifts yield 2 separate yasin_300 events
+test('Test 19: Two independent 200-coin finalized gifts enqueue two separate Yasin events', () => {
   const g1 = classifyGiftInteraction(
-    { unitCoins: 300, repeatCount: 1, giftType: 1, repeatEnd: true, username: 'Ali' },
+    { unitCoins: 200, repeatCount: 1, giftType: 1, repeatEnd: true, username: 'Ali' },
     DEFAULT_TIER_RULES
   );
   const g2 = classifyGiftInteraction(
-    { unitCoins: 300, repeatCount: 1, giftType: 1, repeatEnd: true, username: 'Veli' },
+    { unitCoins: 200, repeatCount: 1, giftType: 1, repeatEnd: true, username: 'Veli' },
     DEFAULT_TIER_RULES
   );
   assert.equal(g1.shouldEnqueue, true);
@@ -802,9 +802,9 @@ test('Test 19: Two independent 300-coin finalized gifts enqueue two separate Yas
 });
 
 // 20. Incomplete streak never creates Yasin
-test('Test 20: Incomplete streak (repeatEnd: false) at 300+ coins is rejected and never creates Yasin', () => {
+test('Test 20: Incomplete streak (repeatEnd: false) at 200+ coins is rejected and never creates Yasin', () => {
   const res = classifyGiftInteraction(
-    { unitCoins: 300, repeatCount: 2, giftType: 1, repeatEnd: false, username: 'Murat' },
+    { unitCoins: 200, repeatCount: 2, giftType: 1, repeatEnd: false, username: 'Murat' },
     DEFAULT_TIER_RULES
   );
   assert.equal(res.shouldEnqueue, false);

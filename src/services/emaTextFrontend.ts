@@ -374,13 +374,13 @@ export interface EmaBenchmarkPreset {
 export const EMA_BENCHMARK_PRESETS: readonly EmaBenchmarkPreset[] = [
   {
     id: 'short_greeting',
-    label: '1. Kısa Selamlama (1–49 jeton)',
+    label: '1. Kısa Selamlama (1–10 jeton)',
     targetDescription: 'Kısa giriş / takipçi selamlaması',
     text: 'Selâmün aleyküm, Ahmet Yılmaz! NUR-I DUA ailemize hoş geldin. Allah razı olsun.',
   },
   {
     id: 'mid_prayer',
-    label: '2. 2–3 Cümlelik Dua (50–149 jeton)',
+    label: '2. 2–3 Cümlelik Dua (11–35 jeton)',
     targetDescription: 'Orta uzunlukta kişiselleştirilmiş dua',
     text: 'Allah’ım, Fatma Nur kardeşimize sağlık, huzur, bereket ve hayırlı bir ömür nasip eyle. Gönlündeki bütün güzel muratlarını hayırlısıyla ihsan eyle, kendisini ve sevdiklerini her türlü kaza ve beladan muhafaza eyle. Âmin.',
   },

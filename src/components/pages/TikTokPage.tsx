@@ -606,9 +606,9 @@ export const TikTokPage: React.FC = () => {
                 [
                   { id: 'follower', label: 'Takipçi' },
                   { id: 'small_gift', label: '1 Coin Küçük' },
-                  { id: 'mid_gift', label: '75 Coin Orta' },
-                  { id: 'high_gift', label: '200 Coin Yüksek' },
-                  { id: 'yasin_300', label: '300+ Yâsîn Eşiği' },
+                  { id: 'mid_gift', label: '25 Coin Orta' },
+                  { id: 'high_gift', label: '100 Coin Yüksek' },
+                  { id: 'yasin_300', label: '200+ Yâsîn Eşiği' },
                   { id: 'streak', label: 'Seri + repeatEnd' },
                   { id: 'incomplete_streak', label: 'Yarım Seri Testi' },
                 ] as const

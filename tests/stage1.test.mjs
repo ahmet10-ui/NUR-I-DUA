@@ -26,14 +26,17 @@ function createBaseTikTokConfig() {
   };
 }
 
-test('Stage 1 boundaries: 1, 49, 50, 149, 150, 299, 300, 600, 1000', () => {
+test('Stage 1 boundaries: 1, 10, 11, 35, 36, 60, 61, 199, 200, 300, 600, 1000', () => {
   const cases = [
     { coins: 1, expectedTier: 'small_gift', requiresPrayer: false },
-    { coins: 49, expectedTier: 'small_gift', requiresPrayer: false },
-    { coins: 50, expectedTier: 'mid_gift', requiresPrayer: true },
-    { coins: 149, expectedTier: 'mid_gift', requiresPrayer: true },
-    { coins: 150, expectedTier: 'high_gift', requiresPrayer: true },
-    { coins: 299, expectedTier: 'high_gift', requiresPrayer: true },
+    { coins: 10, expectedTier: 'small_gift', requiresPrayer: false },
+    { coins: 11, expectedTier: 'mid_gift', requiresPrayer: true },
+    { coins: 35, expectedTier: 'mid_gift', requiresPrayer: true },
+    { coins: 36, expectedTier: 'high_gift', requiresPrayer: true },
+    { coins: 60, expectedTier: 'high_gift', requiresPrayer: true },
+    { coins: 61, expectedTier: 'high_gift', requiresPrayer: true },
+    { coins: 199, expectedTier: 'high_gift', requiresPrayer: true },
+    { coins: 200, expectedTier: 'yasin_300', requiresPrayer: true },
     { coins: 300, expectedTier: 'yasin_300', requiresPrayer: true },
     { coins: 600, expectedTier: 'yasin_300', requiresPrayer: true },
     { coins: 1000, expectedTier: 'yasin_300', requiresPrayer: true },
@@ -54,29 +57,29 @@ test('Stage 1 boundaries: 1, 49, 50, 149, 150, 299, 300, 600, 1000', () => {
   }
 });
 
-test('1 x 300 and 300 x 1 each produce exactly 1 yasin_300 event', () => {
-  const single300 = classifyGiftInteraction({
+test('1 x 200 and 200 x 1 each produce exactly 1 yasin_300 event', () => {
+  const single200 = classifyGiftInteraction({
     username: 'fatma_nur',
-    unitCoins: 300,
+    unitCoins: 200,
     repeatCount: 1,
     giftType: 0,
   });
-  assert.equal(single300.shouldEnqueue, true);
-  assert.equal(single300.tier, 'yasin_300');
-  assert.equal(single300.eventCount, 1);
-  assert.equal(single300.eventCoins, 300);
+  assert.equal(single200.shouldEnqueue, true);
+  assert.equal(single200.tier, 'yasin_300');
+  assert.equal(single200.eventCount, 1);
+  assert.equal(single200.eventCoins, 200);
 
-  const streak300x1 = classifyGiftInteraction({
+  const streak200x1 = classifyGiftInteraction({
     username: 'mehmet_can',
     unitCoins: 1,
-    repeatCount: 300,
+    repeatCount: 200,
     giftType: 1,
     repeatEnd: true,
   });
-  assert.equal(streak300x1.shouldEnqueue, true);
-  assert.equal(streak300x1.tier, 'yasin_300');
-  assert.equal(streak300x1.eventCount, 1);
-  assert.equal(streak300x1.eventCoins, 300);
+  assert.equal(streak200x1.shouldEnqueue, true);
+  assert.equal(streak200x1.tier, 'yasin_300');
+  assert.equal(streak200x1.eventCount, 1);
+  assert.equal(streak200x1.eventCoins, 200);
 });
 
 test('600 x 1 and 1000 x 1 single gift streaks still produce only 1 yasin_300 event', () => {
@@ -92,8 +95,8 @@ test('600 x 1 and 1000 x 1 single gift streaks still produce only 1 yasin_300 ev
 
   const gift600Streak = classifyGiftInteraction({
     username: 'zeynep_kaya',
-    unitCoins: 300,
-    repeatCount: 2,
+    unitCoins: 200,
+    repeatCount: 3,
     giftType: 1,
     repeatEnd: true,
   });
@@ -113,7 +116,7 @@ test('600 x 1 and 1000 x 1 single gift streaks still produce only 1 yasin_300 ev
 });
 
 test('Separate small gifts never accumulate to trigger Yasin', () => {
-  const smallGifts = [49, 49, 49, 49, 49, 49, 49]; // sum = 343 across separate events
+  const smallGifts = Array.from({ length: 25 }, () => 10); // sum = 250 across separate events
   for (const coins of smallGifts) {
     const res = classifyGiftInteraction({
       username: 'same_user',
@@ -129,7 +132,7 @@ test('Separate small gifts never accumulate to trigger Yasin', () => {
 test('Incomplete gift streak (giftType=1, repeatEnd=false) is never classified or finalized early', () => {
   const direct = classifyGiftInteraction({
     username: 'ali_veli',
-    unitCoins: 300,
+    unitCoins: 200,
     repeatCount: 1,
     giftType: 1,
     repeatEnd: false,
@@ -167,7 +170,7 @@ test('Incomplete gift streak (giftType=1, repeatEnd=false) is never classified o
     giftId: '5655',
     giftName: 'Rose',
     unitCoins: 1,
-    repeatCount: 300,
+    repeatCount: 200,
     giftType: 1,
     repeatEnd: true,
   });
@@ -175,7 +178,7 @@ test('Incomplete gift streak (giftType=1, repeatEnd=false) is never classified o
   assert.equal(step2.buffered, false);
   assert.equal(finalizedGifts.length, 1);
   assert.equal(finalizedGifts[0].unitCoins, 1);
-  assert.equal(finalizedGifts[0].repeatCount, 300);
+  assert.equal(finalizedGifts[0].repeatCount, 200);
 
   const classified = classifyGiftInteraction(finalizedGifts[0]);
   assert.equal(classified.tier, 'yasin_300');
@@ -184,7 +187,7 @@ test('Incomplete gift streak (giftType=1, repeatEnd=false) is never classified o
   service.dispose();
 });
 
-test('Two separate completed 300-coin gift events produce two separate events', () => {
+test('Two separate completed 200-coin gift events produce two separate events', () => {
   const finalizedGifts = [];
   const service = new TikTokLiveConnectorService(createBaseTikTokConfig(), {
     onFinalizedGift: (gift) => finalizedGifts.push(gift),
@@ -197,7 +200,7 @@ test('Two separate completed 300-coin gift events produce two separate events', 
     username: 'ayse_demir',
     giftId: '9001',
     giftName: 'Kalp',
-    unitCoins: 300,
+    unitCoins: 200,
     repeatCount: 1,
     giftType: 1,
     repeatEnd: true,
@@ -210,7 +213,7 @@ test('Two separate completed 300-coin gift events produce two separate events', 
     username: 'ayse_demir',
     giftId: '9001',
     giftName: 'Kalp',
-    unitCoins: 300,
+    unitCoins: 200,
     repeatCount: 1,
     giftType: 1,
     repeatEnd: true,

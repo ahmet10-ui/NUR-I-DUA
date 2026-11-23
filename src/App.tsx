@@ -62,11 +62,12 @@ function isBroadcastRoute(): boolean {
 }
 
 const AdminShell: React.FC<{
+  section: AdminSectionId;
+  onSelectSection: (section: AdminSectionId) => void;
   onOpenStandaloneBroadcast: () => void;
   onSignOut: () => void;
-}> = ({ onOpenStandaloneBroadcast, onSignOut }) => {
+}> = ({ section, onSelectSection, onOpenStandaloneBroadcast, onSignOut }) => {
   const { state, activeEvent } = useStudio();
-  const [section, setSection] = useState<AdminSectionId>('overview');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const pendingQueueCount = state.queue.filter(
@@ -74,7 +75,7 @@ const AdminShell: React.FC<{
   ).length;
 
   const handleSelectSection = (id: AdminSectionId) => {
-    setSection(id);
+    onSelectSection(id);
     setMobileNavOpen(false);
   };
 
@@ -83,7 +84,7 @@ const AdminShell: React.FC<{
       case 'overview':
         return (
           <OverviewPage
-            onNavigate={setSection}
+            onNavigate={onSelectSection}
             onOpenStandaloneBroadcast={onOpenStandaloneBroadcast}
           />
         );
@@ -108,7 +109,7 @@ const AdminShell: React.FC<{
       default:
         return (
           <OverviewPage
-            onNavigate={setSection}
+            onNavigate={onSelectSection}
             onOpenStandaloneBroadcast={onOpenStandaloneBroadcast}
           />
         );
@@ -221,6 +222,7 @@ const AdminShell: React.FC<{
 
 export default function App() {
   const [standaloneBroadcast, setStandaloneBroadcast] = useState<boolean>(() => isBroadcastRoute());
+  const [adminSection, setAdminSection] = useState<AdminSectionId>('overview');
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     return sessionStorage.getItem('nur_i_dua_admin_auth') === 'demo-authenticated';
@@ -266,7 +268,7 @@ export default function App() {
       const gutterLeft = (vw - frameW) / 2;
       const gutterTop = (vh - frameH) / 2;
       // Place in side gutter on landscape, top black gutter on tall mobile (gutterTop >= 48),
-      // or cleanly below the ~68px top coin-tier bar on exact/full-bleed 9:16 screens.
+      // or cleanly below the top coin-tier bar on exact/full-bleed 9:16 screens.
       if (gutterLeft >= 150 || gutterTop >= 48) {
         setStandaloneExitTopPx(12);
       } else {
@@ -278,11 +280,13 @@ export default function App() {
     return () => window.removeEventListener('resize', computeExitTop);
   }, [standaloneBroadcast]);
 
-  // Dedicated OBS Browser Source / Clean Broadcast View (zero dashboard controls)
-  if (standaloneBroadcast) {
-    const obsClean =
-      typeof window !== 'undefined' &&
-      new URLSearchParams(window.location.search).get('obs') === '1';
+  const obsClean =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('obs') === '1';
+
+  // Dedicated External OBS Browser Source (`?view=broadcast&obs=1`) or unauthenticated Broadcast preview:
+  // passive server-synced view without opening duplicate TikTok relay connections.
+  if (standaloneBroadcast && (!isAuthenticated || obsClean)) {
     return (
       <StudioProvider isBroadcastView>
         <div className="relative w-screen h-screen bg-[#090706] overflow-hidden">
@@ -313,12 +317,32 @@ export default function App() {
     );
   }
 
+  // Single shared StudioProvider across all authenticated views (TikTokPage, LiveStudioPage, standalone BroadcastView)
+  // so TikTok LIVE connection, playback queue, and audio gesture state remain continuous across transitions.
   return (
     <StudioProvider>
-      <AdminShell
-        onOpenStandaloneBroadcast={enterStandaloneBroadcast}
-        onSignOut={handleSignOut}
-      />
+      {standaloneBroadcast ? (
+        <div className="relative w-screen h-screen bg-[#090706] overflow-hidden">
+          <BroadcastView standalone />
+          <button
+            type="button"
+            data-testid="standalone-exit-button"
+            onClick={exitStandaloneBroadcast}
+            style={{ top: `calc(env(safe-area-inset-top, 0px) + ${standaloneExitTopPx}px)` }}
+            className="fixed left-3 z-50 opacity-35 hover:opacity-100 focus:opacity-100 transition-opacity inline-flex items-center gap-1.5 bg-[#080F22]/90 border border-[#C9A45C]/40 px-3 py-1.5 text-xs text-[#E5C88B] cursor-pointer"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Control Center</span>
+          </button>
+        </div>
+      ) : (
+        <AdminShell
+          section={adminSection}
+          onSelectSection={setAdminSection}
+          onOpenStandaloneBroadcast={enterStandaloneBroadcast}
+          onSignOut={handleSignOut}
+        />
+      )}
     </StudioProvider>
   );
 }

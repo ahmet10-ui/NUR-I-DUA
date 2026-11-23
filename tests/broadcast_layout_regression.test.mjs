@@ -51,19 +51,23 @@ function makeEvent(overrides = {}) {
   };
 }
 
-test('1. Top horizontal coin-tier bar defines exact 4 boxes in order with 3rd box widest & 150–299 nowrap', () => {
+test('1. Top horizontal coin-tier bar defines exact 4 boxes in order with 3rd box widest & JETON unitLabel', () => {
   assert.equal(TOP_TIER_BAR_ITEMS.length, 4);
   assert.deepEqual(
-    TOP_TIER_BAR_ITEMS.map((item) => ({ range: item.range, label: item.label })),
+    TOP_TIER_BAR_ITEMS.map((item) => ({
+      range: item.range,
+      unitLabel: item.unitLabel,
+      label: item.label,
+    })),
     [
-      { range: '1–49', label: 'Selamlama' },
-      { range: '50–149', label: 'Açılış duası' },
-      { range: '150–299', label: 'Kapsamlı dua' },
-      { range: '300+', label: 'Yâsîn' },
+      { range: '1–10', unitLabel: 'JETON', label: 'Selamlama' },
+      { range: '11–35', unitLabel: 'JETON', label: 'Açılış duası' },
+      { range: '36–60 · 61–199', unitLabel: 'JETON', label: 'Kapsamlı dua' },
+      { range: '200+', unitLabel: 'JETON', label: 'Yâsîn' },
     ]
   );
 
-  // 3rd box (150–299 Kapsamlı dua) MUST be strictly wider than boxes 1, 2, 4
+  // 3rd box (36–60 · 61–199 Kapsamlı dua) MUST be strictly wider than boxes 1, 2, 4
   assert.equal(TOP_TIER_BAR_GRID_COLUMNS, '0.85fr 1fr 1.5fr 0.85fr');
   assert.ok(TOP_TIER_BAR_ITEMS[2].weight > TOP_TIER_BAR_ITEMS[0].weight);
   assert.ok(TOP_TIER_BAR_ITEMS[2].weight > TOP_TIER_BAR_ITEMS[1].weight);
@@ -72,6 +76,8 @@ test('1. Top horizontal coin-tier bar defines exact 4 boxes in order with 3rd bo
 
   const broadcastSrc = fs.readFileSync(path.resolve('src/components/BroadcastView.tsx'), 'utf8');
   assert.ok(broadcastSrc.includes('TOP_TIER_BAR_GRID_COLUMNS'));
+  assert.ok(broadcastSrc.includes('buildTopTierBarItems'));
+  assert.ok(broadcastSrc.includes('item.unitLabel'));
   assert.ok(broadcastSrc.includes('whitespace-nowrap'));
   assert.ok(broadcastSrc.includes('aspect-[9/16]'));
 });
@@ -89,7 +95,7 @@ test('2. BroadcastView NEVER displays Arabic text, Arabic transliteration, Turki
   assert.equal(broadcastSrc.includes('dir="rtl"'), false);
 });
 
-test('3. 1–49 coins and follow events NEVER display a prayer notification on broadcast screen', () => {
+test('3. 1–10 coins and follow events NEVER display a prayer notification on broadcast screen', () => {
   const smallGift = makeEvent({
     tier: 'small_gift',
     unitCoins: 10,
@@ -109,7 +115,7 @@ test('3. 1–49 coins and follow events NEVER display a prayer notification on b
   assert.equal(getActiveTopTierId(smallGift, false), null);
 });
 
-test('4. 50–149 coins displays "{Kullanıcı Adı} isimli kardeşimizin {Dua Adı} duası okunuyor." ONLY when started', () => {
+test('4. 11–35 coins displays "{Kullanıcı Adı} isimli kardeşimizin {Dua Adı} duası okunuyor." ONLY when started', () => {
   const midEv = makeEvent({
     tier: 'mid_gift',
     username: 'mehmet_can',
@@ -131,7 +137,7 @@ test('4. 50–149 coins displays "{Kullanıcı Adı} isimli kardeşimizin {Dua A
   assert.equal(formatBroadcastPrayerNotification(null, false), null);
 });
 
-test('5. 150–299 coins displays selected comprehensive dua title WITHOUT Arabic or Turkish meal', () => {
+test('5. 36–199 coins displays selected comprehensive dua title WITHOUT Arabic or Turkish meal', () => {
   const highDua = DEFAULT_HIGH_TIER_DUAS[0];
   const highEv = makeEvent({
     tier: 'high_gift',
@@ -155,7 +161,7 @@ test('5. 150–299 coins displays selected comprehensive dua title WITHOUT Arabi
   assert.equal(getActiveTopTierId(highEv, true), 'high_gift');
 });
 
-test('6. 300+ coins (Yâsîn) shows strictly "Yâsîn-i Şerîf okunuyor" without username, Arabic, meal, or takdim/closing', () => {
+test('6. 200+ coins (Yâsîn) shows strictly "Yâsîn-i Şerîf okunuyor" without username, Arabic, meal, or takdim/closing', () => {
   const yasinEv = makeEvent({
     tier: 'yasin_300',
     username: 'mustafa_oz',

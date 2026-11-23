@@ -460,7 +460,7 @@ export const GiftsPage: React.FC = () => {
 
             <div>
               <label htmlFor="tier-small-tpl" className="block text-xs text-slate-300 mb-1">
-                Küçük Hediye (1–49) Selamlama Şablonu (<code className="text-[#E5C88B]">{'{isim}'}</code>)
+                Küçük Hediye ({tierDraft.smallGiftMinCoins}–{tierDraft.smallGiftMaxCoins}) Selamlama Şablonu (<code className="text-[#E5C88B]">{'{isim}'}</code>)
               </label>
               <input
                 id="tier-small-tpl"

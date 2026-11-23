@@ -4,13 +4,15 @@ import { PRAYER_CATEGORIES } from '../../data/defaults';
 import { useStudio } from '../../context/StudioContext';
 import { InteractionTierId } from '../../types/nuridua';
 
-const TIER_LABELS: Record<InteractionTierId, string> = {
+import { resolveTierRules } from '../../services/interactionClassifier';
+
+const getTierLabels = (yasinMinCoins: number): Record<InteractionTierId, string> => ({
   follower: 'Takipçi',
   small_gift: 'Küçük Hediye',
   mid_gift: 'Orta Hediye',
   high_gift: 'Yüksek Hediye',
-  yasin_300: 'Yâsîn (300+)',
-};
+  yasin_300: `Yâsîn (${yasinMinCoins}+)`,
+});
 
 export const QueuePage: React.FC = () => {
   const {
@@ -151,7 +153,8 @@ export const QueuePage: React.FC = () => {
           {state.queue.map((item, index) => {
             const cat = PRAYER_CATEGORIES.find((c) => c.id === item.category)?.labelTr || item.category;
             const scholarName = state.scholars.profiles[item.scholarId].name;
-            const tierLabel = item.tier ? TIER_LABELS[item.tier] : null;
+            const tierLabels = getTierLabels(resolveTierRules(state.tierRules).yasinMinCoins);
+            const tierLabel = item.tier ? tierLabels[item.tier] : null;
             return (
               <div
                 key={item.id}

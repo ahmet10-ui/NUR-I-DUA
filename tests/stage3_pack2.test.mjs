@@ -250,8 +250,8 @@ function createFakeQueueManager() {
   };
 }
 
-test('1-4. Single finalized 300, 600, 1000 coin gifts create exactly 1 Yâsîn each; 2 independent gifts create 2 Yâsîn items', () => {
-  for (const coins of [300, 600, 1000]) {
+test('1-4. Single finalized 200, 600, 1000 coin gifts create exactly 1 Yâsîn each; 2 independent gifts create 2 Yâsîn items', () => {
+  for (const coins of [200, 600, 1000]) {
     const c = classifyGiftInteraction({
       username: 'ahmet_can',
       unitCoins: coins,
@@ -270,7 +270,7 @@ test('1-4. Single finalized 300, 600, 1000 coin gifts create exactly 1 Yâsîn e
     username: 'ali_veli',
     giftId: 'yasin_gift',
     giftName: 'Aslan',
-    unitCoins: 300,
+    unitCoins: 200,
     repeatCount: 1,
     giftType: 0,
     streakKey: 'ind_1',
@@ -279,7 +279,7 @@ test('1-4. Single finalized 300, 600, 1000 coin gifts create exactly 1 Yâsîn e
     username: 'veli_ali',
     giftId: 'yasin_gift',
     giftName: 'Aslan',
-    unitCoins: 300,
+    unitCoins: 200,
     repeatCount: 1,
     giftType: 0,
     streakKey: 'ind_2',
@@ -289,7 +289,7 @@ test('1-4. Single finalized 300, 600, 1000 coin gifts create exactly 1 Yâsîn e
   assert.equal(mgr.queue.filter((e) => e.tier === 'yasin_300').length, 2);
 });
 
-test('5-6. Streak math: 1 coin x 300 finalized -> 1 Yâsîn; incomplete streak -> 0 Yâsîn', () => {
+test('5-6. Streak math: 1 coin x 200 finalized -> 1 Yâsîn; incomplete streak -> 0 Yâsîn', () => {
   const mgr = createFakeQueueManager();
   const receivedFinalized = [];
   const svc = new TikTokLiveConnectorService(
@@ -312,15 +312,15 @@ test('5-6. Streak math: 1 coin x 300 finalized -> 1 Yâsîn; incomplete streak -
     }
   );
 
-  // Incomplete 1 x 300 streak -> buffered ONLY, 0 Yâsîn queued
+  // Incomplete 1 x 199 streak -> buffered ONLY, 0 Yâsîn queued
   const inc1 = svc.ingestRawGiftEvent({
     eventId: 'stk_inc_y1',
-    userId: 'u300',
+    userId: 'u200',
     username: 'serhat_seri',
     giftId: '5655',
     giftName: 'Gül',
     giftType: 1,
-    repeatCount: 299,
+    repeatCount: 199,
     repeatEnd: false,
     unitCoins: 1,
   });
@@ -328,15 +328,15 @@ test('5-6. Streak math: 1 coin x 300 finalized -> 1 Yâsîn; incomplete streak -
   assert.equal(receivedFinalized.length, 0);
   assert.equal(mgr.queue.length, 0);
 
-  // Finalized 1 x 300 streak -> strictly 1 Yâsîn queued
+  // Finalized 1 x 200 streak -> strictly 1 Yâsîn queued
   const fin = svc.ingestRawGiftEvent({
     eventId: 'stk_fin_y1',
-    userId: 'u300',
+    userId: 'u200',
     username: 'serhat_seri',
     giftId: '5655',
     giftName: 'Gül',
     giftType: 1,
-    repeatCount: 300,
+    repeatCount: 200,
     repeatEnd: true,
     unitCoins: 1,
   });
@@ -344,17 +344,17 @@ test('5-6. Streak math: 1 coin x 300 finalized -> 1 Yâsîn; incomplete streak -
   assert.equal(receivedFinalized.length, 1);
   assert.equal(mgr.queue.length, 1);
   assert.equal(mgr.queue[0].tier, 'yasin_300');
-  assert.equal(mgr.queue[0].eventCoins, 300);
+  assert.equal(mgr.queue[0].eventCoins, 200);
 
   // Separate uncompleted streak that disconnects -> 0 new Yâsîn
   svc.ingestRawGiftEvent({
     eventId: 'stk_inc_y2',
-    userId: 'u301',
+    userId: 'u201',
     username: 'yarim_yasin',
     giftId: '5655',
     giftName: 'Gül',
     giftType: 1,
-    repeatCount: 300,
+    repeatCount: 200,
     repeatEnd: false,
     unitCoins: 1,
   });
@@ -403,7 +403,7 @@ test('7 & 14b. Relay SSE yasin_300 & replay deduplication blocks duplicate Yâs�
           username: 'fcproplayer7',
           scenario: 'yasin_300',
           senderUsername: 'yasin_sim_user',
-          unitCoins: 300,
+          unitCoins: 200,
         }),
       })
     ).json();

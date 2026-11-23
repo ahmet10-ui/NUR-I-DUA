@@ -1003,9 +1003,9 @@ export function createRelayServer(options = {}) {
     // Single gift scenarios: small_gift | mid_gift | high_gift | yasin_300
     const defaultsByScenario = {
       small_gift: { unitCoins: 1, giftId: '5655', giftName: 'Çay (Simülasyon)' },
-      mid_gift: { unitCoins: 75, giftId: '5660', giftName: 'Kalp Kutusu (Simülasyon)' },
-      high_gift: { unitCoins: 200, giftId: '5760', giftName: 'Altın Taç (Simülasyon)' },
-      yasin_300: { unitCoins: 300, giftId: '6001', giftName: 'Nurlu Taç (300+ Simülasyon)' },
+      mid_gift: { unitCoins: 25, giftId: '5660', giftName: 'Kalp Kutusu (Simülasyon)' },
+      high_gift: { unitCoins: 100, giftId: '5760', giftName: 'Altın Taç (Simülasyon)' },
+      yasin_300: { unitCoins: 200, giftId: '6001', giftName: 'Nurlu Taç (200+ Simülasyon)' },
     };
 
     const chosen = defaultsByScenario[scenario] || defaultsByScenario.small_gift;

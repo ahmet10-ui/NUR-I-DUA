@@ -178,6 +178,7 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
   private simulationStreamMode = false;
   private activeHandle = '';
   private hadConnectedSession = false;
+  private lastError: string | null = null;
   private lastEventIds = new Map<string, string>();
 
   // Streak aggregation & idempotent duplicate protection
@@ -262,6 +263,30 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     return this.status;
   }
 
+  hasActiveStream(): boolean {
+    return Boolean(this.eventSource && !this.manualDisconnect && !this.simulationStreamMode);
+  }
+
+  getSessionIdentity(): { baseUrl: string; username: string } {
+    return {
+      baseUrl: normalizeRelayBaseUrl(this.config.connectorEndpoint),
+      username: sanitizeTikTokHandle(this.config.username) || this.activeHandle || 'fcproplayer7',
+    };
+  }
+
+  getSnapshot(): TikTokConnectorStatusPayload {
+    return {
+      state: this.status,
+      username: sanitizeTikTokHandle(this.config.username) || this.activeHandle || 'fcproplayer7',
+      roomId: this.roomId,
+      viewerCount: this.viewerCount,
+      followerCount: this.followerCount,
+      lastEvent: this.lastEvent,
+      error: this.lastError,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   updateCallbacks(callbacks: TikTokConnectorCallbacks): void {
     this.callbacks = callbacks;
   }
@@ -291,6 +316,7 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     }
   ): void {
     this.status = nextState;
+    this.lastError = error;
     if (meta?.roomId !== undefined) this.roomId = meta.roomId;
     if (meta?.viewerCount !== undefined) this.viewerCount = meta.viewerCount;
     if (meta?.followerCount !== undefined) this.followerCount = meta.followerCount;
@@ -1176,3 +1202,284 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     this.clearPendingStreaks();
   }
 }
+
+const DEFAULT_SHARED_TIKTOK_CONFIG: TikTokConnectionConfig = {
+  username: 'fcproplayer7',
+  connectionState: 'unconfigured',
+  connectorEndpoint: '',
+  autoReconnect: true,
+  maxRetries: 5,
+  retryDelaySec: 8,
+  duplicateWindowSec: 8,
+  lastError: null,
+  lastCheckedAt: null,
+  roomId: null,
+  viewerCount: null,
+  followerCount: null,
+  lastEvent: null,
+};
+
+type BufferedManagerEvent =
+  | { type: 'gift'; payload: TikTokRelayGiftPayload }
+  | { type: 'follow'; payload: TikTokRelayFollowPayload }
+  | { type: 'gap'; payload: TikTokRecoveryGapInfo };
+
+/**
+ * Centralized application-wide TikTok LIVE connection manager.
+ *
+ * Lives at module scope outside React component lifecycles so switching between
+ * TikTokPage, LiveStudioPage, and BroadcastView NEVER disposes, closes SSE streams,
+ * or opens duplicate connections. Only explicit `disconnect()` closes the live connection.
+ */
+export class SharedTikTokConnectionManager {
+  private service: TikTokLiveConnectorService;
+  private consumerCallbacks: TikTokConnectorCallbacks | null = null;
+  private latestStatus: TikTokConnectorStatusPayload;
+  private inFlightConnect: {
+    key: string;
+    promise: Promise<{ ok: boolean; error?: string }>;
+  } | null = null;
+  private activeSessionKey = '';
+  private pendingWhileDetached: BufferedManagerEvent[] = [];
+
+  constructor(
+    initialConfig: Partial<TikTokConnectionConfig> = {},
+    options: TikTokServiceOptions = {}
+  ) {
+    const merged: TikTokConnectionConfig = {
+      ...DEFAULT_SHARED_TIKTOK_CONFIG,
+      ...initialConfig,
+    };
+    this.service = new TikTokLiveConnectorService(merged, this.createBridgeCallbacks(), options);
+    this.latestStatus = this.service.getSnapshot();
+  }
+
+  private createBridgeCallbacks(): TikTokConnectorCallbacks {
+    return {
+      onStatusChange: (payload) => {
+        this.latestStatus = { ...payload };
+        if (payload.state !== 'connected' && payload.state !== 'connecting') {
+          this.activeSessionKey = '';
+        }
+        this.consumerCallbacks?.onStatusChange?.(payload);
+      },
+      onFinalizedGift: (gift) => {
+        if (!gift.isSimulated) {
+          this.latestStatus = {
+            ...this.latestStatus,
+            lastEvent: {
+              kind: 'gift',
+              username: gift.username,
+              displayUsername: `@${gift.username}`,
+              summary: `${gift.giftName} ×${gift.quantity}`,
+              coins: (gift.unitCoins ?? gift.diamondCount ?? 0) * Math.max(1, gift.quantity),
+              timestamp: gift.timestamp || new Date().toISOString(),
+              eventId: gift.transactionId || gift.streakKey,
+            },
+          };
+        }
+        if (this.consumerCallbacks?.onFinalizedGift) {
+          this.consumerCallbacks.onFinalizedGift(gift);
+        } else {
+          this.bufferDetachedEvent({ type: 'gift', payload: gift });
+        }
+      },
+      onFollowEvent: (follow) => {
+        if (!follow.isSimulated) {
+          const uname = follow.username || follow.nickname || 'tiktok_takipci';
+          this.latestStatus = {
+            ...this.latestStatus,
+            lastEvent: {
+              kind: 'follow',
+              username: uname,
+              displayUsername: `@${uname}`,
+              summary: 'Yeni takipçi',
+              timestamp: follow.timestamp || new Date().toISOString(),
+              eventId: follow.eventId,
+            },
+          };
+        }
+        if (this.consumerCallbacks?.onFollowEvent) {
+          this.consumerCallbacks.onFollowEvent(follow);
+        } else {
+          this.bufferDetachedEvent({ type: 'follow', payload: follow });
+        }
+      },
+      onRecoveryGap: (gap) => {
+        if (this.consumerCallbacks?.onRecoveryGap) {
+          this.consumerCallbacks.onRecoveryGap(gap);
+        } else {
+          this.bufferDetachedEvent({ type: 'gap', payload: gap });
+        }
+      },
+      onLog: (level, message) => {
+        this.consumerCallbacks?.onLog?.(level, message);
+      },
+    };
+  }
+
+  private bufferDetachedEvent(item: BufferedManagerEvent): void {
+    this.pendingWhileDetached.push(item);
+    if (this.pendingWhileDetached.length > 50) {
+      this.pendingWhileDetached.shift();
+    }
+  }
+
+  getService(): TikTokLiveConnectorService {
+    return this.service;
+  }
+
+  getStatus(): TikTokConnectionState {
+    return this.service.getStatus();
+  }
+
+  getLatestStatus(): TikTokConnectorStatusPayload {
+    return { ...this.latestStatus };
+  }
+
+  hasActiveLiveSession(): boolean {
+    return (
+      (this.service.getStatus() === 'connected' || this.service.getStatus() === 'connecting') &&
+      (this.service.hasActiveStream() || this.inFlightConnect !== null)
+    );
+  }
+
+  isSimulationStreamActive(): boolean {
+    return this.service.isSimulationStreamActive;
+  }
+
+  attachCallbacks(callbacks: TikTokConnectorCallbacks): void {
+    this.consumerCallbacks = callbacks;
+    if (this.pendingWhileDetached.length > 0) {
+      const queued = this.pendingWhileDetached.splice(0, this.pendingWhileDetached.length);
+      for (const item of queued) {
+        if (item.type === 'gift') callbacks.onFinalizedGift?.(item.payload);
+        else if (item.type === 'follow') callbacks.onFollowEvent?.(item.payload);
+        else if (item.type === 'gap') callbacks.onRecoveryGap?.(item.payload);
+      }
+    }
+  }
+
+  detachCallbacks(callbacks: TikTokConnectorCallbacks): void {
+    // Only unbind callbacks cleanly; NEVER close or dispose active TikTok connection!
+    if (this.consumerCallbacks === callbacks) {
+      this.consumerCallbacks = null;
+    }
+  }
+
+  updateConfig(next: Partial<TikTokConnectionConfig>): void {
+    const isLive =
+      this.service.getStatus() === 'connected' || this.service.getStatus() === 'connecting';
+    // Do not overwrite live state metadata from stale UI defaults
+    const {
+      connectionState: _ignoredState,
+      roomId: _ignoredRoom,
+      viewerCount: _ignoredViewers,
+      followerCount: _ignoredFollowers,
+      lastEvent: _ignoredLastEvent,
+      lastError: _ignoredLastError,
+      lastCheckedAt: _ignoredChecked,
+      ...safeConfigPatch
+    } = next;
+
+    this.service.updateConfig(isLive ? safeConfigPatch : next);
+    if (!isLive) {
+      this.latestStatus = this.service.getSnapshot();
+    }
+  }
+
+  async connect(
+    username?: string,
+    configPatch?: Partial<TikTokConnectionConfig>
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (configPatch) {
+      this.updateConfig(configPatch);
+    }
+
+    const identity = this.service.getSessionIdentity();
+    const targetHandle = sanitizeTikTokHandle(username || identity.username) || identity.username;
+    const targetBaseUrl = normalizeRelayBaseUrl(
+      configPatch?.connectorEndpoint ?? identity.baseUrl
+    );
+    const targetKey = `${targetBaseUrl}::${targetHandle}`;
+
+    // Idempotent guard: already connecting to the exact same stream
+    if (this.inFlightConnect && this.inFlightConnect.key === targetKey) {
+      return this.inFlightConnect.promise;
+    }
+
+    // Idempotent guard: already connected with an active SSE stream for the exact same stream
+    if (
+      targetBaseUrl &&
+      this.service.getStatus() === 'connected' &&
+      this.service.hasActiveStream() &&
+      this.activeSessionKey === targetKey
+    ) {
+      this.consumerCallbacks?.onStatusChange?.(this.getLatestStatus());
+      return { ok: true };
+    }
+
+    this.activeSessionKey = targetKey;
+    const entry: { key: string; promise: Promise<{ ok: boolean; error?: string }> } = {
+      key: targetKey,
+      promise: Promise.resolve({ ok: false }),
+    };
+    const promise = (async () => {
+      try {
+        const result = await this.service.connect(targetHandle);
+        if (!result.ok) {
+          this.activeSessionKey = '';
+        }
+        return result;
+      } finally {
+        if (this.inFlightConnect === entry) {
+          this.inFlightConnect = null;
+        }
+      }
+    })();
+    entry.promise = promise;
+    this.inFlightConnect = entry;
+    return promise;
+  }
+
+  async reconnect(
+    username?: string,
+    configPatch?: Partial<TikTokConnectionConfig>
+  ): Promise<{ ok: boolean; error?: string }> {
+    if (configPatch) {
+      this.updateConfig(configPatch);
+    }
+    this.activeSessionKey = '';
+    this.inFlightConnect = null;
+    const identity = this.service.getSessionIdentity();
+    const targetHandle = sanitizeTikTokHandle(username || identity.username) || identity.username;
+    const targetKey = `${identity.baseUrl}::${targetHandle}`;
+    this.activeSessionKey = targetKey;
+    const res = await this.service.reconnect(targetHandle);
+    if (!res.ok) {
+      this.activeSessionKey = '';
+    }
+    return res;
+  }
+
+  async disconnect(): Promise<void> {
+    this.activeSessionKey = '';
+    this.inFlightConnect = null;
+    await this.service.disconnect();
+  }
+
+  async checkHealth(explicitEndpoint?: string) {
+    return this.service.checkHealth(explicitEndpoint);
+  }
+
+  connectSimulationStream(username: string): { ok: boolean; error?: string } {
+    return this.service.connectSimulationStream(username);
+  }
+
+  stopSimulationStream(): void {
+    this.service.stopSimulationStream();
+  }
+}
+
+export const sharedTikTokConnectionManager = new SharedTikTokConnectionManager();
+

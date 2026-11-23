@@ -2,10 +2,10 @@ import React from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { useStudio } from '../context/StudioContext';
 import {
+  buildTopTierBarItems,
   formatBroadcastPrayerNotification,
   getActiveTopTierId,
   TOP_TIER_BAR_GRID_COLUMNS,
-  TOP_TIER_BAR_ITEMS,
 } from '../services/broadcastDisplay';
 import { MosqueViewport } from './MosqueViewport';
 
@@ -20,6 +20,7 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
   const activeScholarId = activeEvent?.scholarId || scholars.currentSpeaker;
   const isActivelyPlaying = Boolean(activeEvent && playbackStarted && speakingState === 'speaking');
   const activeTierId = getActiveTopTierId(activeEvent, isActivelyPlaying);
+  const topTierBarItems = buildTopTierBarItems(state.tierRules);
   const notificationText = formatBroadcastPrayerNotification(activeEvent, isActivelyPlaying);
   const brandTitle = (broadcast.studioTitle || '').trim() || 'NUR-I DUA';
 
@@ -81,7 +82,7 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
             className="grid gap-1 px-2 pb-1.5 w-full"
             style={{ gridTemplateColumns: TOP_TIER_BAR_GRID_COLUMNS }}
           >
-            {TOP_TIER_BAR_ITEMS.map((item) => {
+            {topTierBarItems.map((item) => {
               const isHighlighted = activeTierId === item.tier;
               return (
                 <div
@@ -93,8 +94,11 @@ export const BroadcastView: React.FC<BroadcastViewProps> = ({ standalone = false
                       : 'bg-[#1A120D]/95 border-[#C9A45C]/30'
                   }`}
                 >
-                  <p className="text-[10px] sm:text-[11px] font-bold leading-tight text-[#F3D999] whitespace-nowrap">
+                  <p className="text-[9.5px] sm:text-[10.5px] font-bold leading-none text-[#F3D999] whitespace-nowrap">
                     {item.range}
+                  </p>
+                  <p className="mt-0.5 text-[7.5px] sm:text-[8.5px] font-semibold tracking-[0.12em] leading-none text-[#E5C88B] uppercase whitespace-nowrap">
+                    {item.unitLabel}
                   </p>
                   <p className="mt-0.5 text-[8.5px] sm:text-[9.5px] leading-tight text-[#F6F0E4] truncate">
                     {item.label}

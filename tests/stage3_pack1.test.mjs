@@ -234,7 +234,7 @@ test('raw.uniqueId and user.uniqueId fallback chain works for follow & gift inge
   svc.dispose();
 });
 
-test('End-to-end Relay -> SSE -> Client -> Classifier for follower, 1 coin, 50-149, 150-299, and 300+ (guard preserved)', async () => {
+test('End-to-end Relay -> SSE -> Client -> Classifier for follower, 1 coin, 11-35, 36-199, and 200+ (guard preserved)', async () => {
   const mock = createMockWebCastFactory();
   const { relay, baseUrl } = await startTestRelay({ connectionFactory: mock.factory });
   const originalES = globalThis.EventSource;
@@ -283,40 +283,40 @@ test('End-to-end Relay -> SSE -> Client -> Classifier for follower, 1 coin, 50-1
       extendedGiftInfo: { diamond_count: 1 },
     });
 
-    // 3. Mid gift (75 coin)
+    // 3. Mid gift (25 coin, inside 11-35)
     webcast.emit('gift', {
       userId: '103',
-      uniqueId: 'mehmet_75coin',
+      uniqueId: 'mehmet_25coin',
       giftId: '5660',
       giftName: 'Kalp',
       giftType: 0,
       repeatCount: 1,
-      msgId: 'm_gft_75',
-      extendedGiftInfo: { diamond_count: 75 },
+      msgId: 'm_gft_25',
+      extendedGiftInfo: { diamond_count: 25 },
     });
 
-    // 4. High gift (200 coin)
+    // 4. High gift (100 coin, inside 36-199)
     webcast.emit('gift', {
       userId: '104',
-      uniqueId: 'fatma_200coin',
+      uniqueId: 'fatma_100coin',
       giftId: '5760',
       giftName: 'Taç',
       giftType: 0,
       repeatCount: 1,
-      msgId: 'm_gft_200',
-      extendedGiftInfo: { diamond_count: 200 },
+      msgId: 'm_gft_100',
+      extendedGiftInfo: { diamond_count: 100 },
     });
 
-    // 5. Yâsîn threshold (300+ coin)
+    // 5. Yâsîn threshold (200+ coin)
     webcast.emit('gift', {
       userId: '105',
-      uniqueId: 'ali_300coin',
+      uniqueId: 'ali_200coin',
       giftId: '6001',
       giftName: 'Nurlu Taç',
       giftType: 0,
       repeatCount: 1,
-      msgId: 'm_gft_300',
-      extendedGiftInfo: { diamond_count: 300 },
+      msgId: 'm_gft_200',
+      extendedGiftInfo: { diamond_count: 200 },
     });
 
     const ok = await waitFor(() => follows.length === 1 && gifts.length === 4);
@@ -334,25 +334,25 @@ test('End-to-end Relay -> SSE -> Client -> Classifier for follower, 1 coin, 50-1
     assert.equal(cSmall.requiresPrayer, false);
     assert.ok(cSmall.renderedGreeting?.includes('Ayse 1coin'));
 
-    // Verify 3: 50-149 mid gift -> Başlangıç duası
+    // Verify 3: 11-35 mid gift -> Başlangıç duası
     const cMid = classifyGiftInteraction(gifts[1]);
     assert.equal(cMid.tier, 'mid_gift');
     assert.equal(cMid.requiresPrayer, true);
     const pickedMid = pickNonConsecutiveMidPrayer(DEFAULT_MID_OPENING_PRAYERS, null);
     assert.ok(pickedMid);
 
-    // Verify 4: 150-299 high gift -> Verified high prayer flow
+    // Verify 4: 36-199 high gift -> Verified high prayer flow
     const cHigh = classifyGiftInteraction(gifts[2]);
     assert.equal(cHigh.tier, 'high_gift');
     assert.equal(cHigh.requiresPrayer, true);
     const turkishDua = buildHighTierTurkishSpeech(DEFAULT_HIGH_TIER_DUAS[0], gifts[2].username);
-    assert.ok(turkishDua.includes('Fatma 200coin'));
+    assert.ok(turkishDua.includes('Fatma 100coin'));
 
-    // Verify 5: 300+ coin -> Classified as yasin_300 (Stage 2 guard remains intact in StudioContext)
+    // Verify 5: 200+ coin -> Classified as yasin_300 (Stage 2 guard remains intact in StudioContext)
     const cYasin = classifyGiftInteraction(gifts[3]);
     assert.equal(cYasin.tier, 'yasin_300');
     assert.equal(cYasin.eventCount, 1);
-    assert.equal(cYasin.eventCoins, 300);
+    assert.equal(cYasin.eventCoins, 200);
   } finally {
     await svc.disconnect();
     svc.dispose();
@@ -551,7 +551,7 @@ test('SSE disconnect & Last-Event-ID replay recovers missed events in order and 
         username: 'fcproplayer7',
         scenario: 'mid_gift',
         senderUsername: 'kacan_ikinci',
-        unitCoins: 75,
+        unitCoins: 25,
       }),
     });
     await fetch(`${baseUrl}/simulate`, {
@@ -561,7 +561,7 @@ test('SSE disconnect & Last-Event-ID replay recovers missed events in order and 
         username: 'fcproplayer7',
         scenario: 'high_gift',
         senderUsername: 'kacan_ucuncu',
-        unitCoins: 200,
+        unitCoins: 100,
       }),
     });
 

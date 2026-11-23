@@ -204,13 +204,13 @@ export interface Stage2PlaybackParams {
 
 /**
  * Orchestrates Stage 2 & Stage 3 event playback with strict audio-isolation lock:
- * - For `yasin_300` (300+ coins): runs an atomic 3-phase sequence on Hacı Ahmet Efendi (`scholar_1`):
+ * - For `yasin_300` (200+ coins): runs an atomic 3-phase sequence on Hacı Ahmet Efendi (`scholar_1`):
  *   1) `yasin_intro`: Hacı Ahmet Efendi opening takdim speech
  *   2) `arabic_audio`: Full verified Yâsîn-i Şerîf Qari audio recording (strictly requires verified playback start)
  *   3) `turkish_speech`: Hacı Ahmet Efendi long closing thank-you & ithaf prayer
  *   If Yâsîn audio is missing, unverified, stalls on start, fires a premature end without starting,
  *   or fails during playback, emits `onError` cleanly without pretending Yâsîn completed.
- * - For `high_gift` (150-299 coins): plays verified Arabic Qari audio FIRST (when verified_ready),
+ * - For `high_gift` (36–199 coins): plays verified Arabic Qari audio FIRST (when verified_ready),
  *   then routes ONLY the personalized family/parents/relatives dua (NEVER Arabic, NEVER Turkish meal)
  *   to the scholar's isolated TTS engine.
  * - Never permits concurrent interruption while active unless `cancel()` is explicitly called.

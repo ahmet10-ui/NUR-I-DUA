@@ -13,7 +13,7 @@ export const PRAYER_CATEGORIES: PrayerCategoryMeta[] = [
     id: 'mid_opening',
     labelTr: 'Başlangıç Duaları (Orta Hediye)',
     labelEn: 'Opening Duas (Mid Gift)',
-    description: 'Dedicated pool for mid-tier gifts (50–149 coins) with non-consecutive rotation.',
+    description: 'Dedicated pool for mid-tier gifts (11–35 coins) with non-consecutive rotation.',
   },
   {
     id: 'health_healing',
@@ -274,7 +274,7 @@ export const SAMPLE_TIKTOK_USERNAMES = [
   'hatice.aydin',
 ];
 
-export const DEFAULT_TIER_RULES: TierRuleConfig = {
+export const LEGACY_DEFAULT_TIER_THRESHOLDS = {
   smallGiftMinCoins: 1,
   smallGiftMaxCoins: 49,
   midGiftMinCoins: 50,
@@ -282,6 +282,16 @@ export const DEFAULT_TIER_RULES: TierRuleConfig = {
   highGiftMinCoins: 150,
   highGiftMaxCoins: 299,
   yasinMinCoins: 300,
+} as const;
+
+export const DEFAULT_TIER_RULES: TierRuleConfig = {
+  smallGiftMinCoins: 1,
+  smallGiftMaxCoins: 10,
+  midGiftMinCoins: 11,
+  midGiftMaxCoins: 35,
+  highGiftMinCoins: 36,
+  highGiftMaxCoins: 199,
+  yasinMinCoins: 200,
   coinEvaluationMode: 'event_total',
   followerEnabled: true,
   smallGiftEnabled: true,

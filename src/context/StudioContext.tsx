@@ -2,7 +2,9 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import {
   createDefaultAppState,
   DEFAULT_MID_OPENING_PRAYERS,
+  DEFAULT_TIER_RULES,
   DEFAULT_YASIN_RECITATION,
+  LEGACY_DEFAULT_TIER_THRESHOLDS,
   PRAYER_CATEGORIES,
   SAMPLE_TIKTOK_USERNAMES,
 } from '../data/defaults';
@@ -18,7 +20,7 @@ import {
 } from '../services/syncClient';
 import {
   normalizeRelayBaseUrl,
-  TikTokLiveConnectorService,
+  sharedTikTokConnectionManager,
 } from '../services/tiktokLiveConnectorService';
 import {
   classifyFollowInteraction,
@@ -105,7 +107,7 @@ interface StudioContextValue {
   togglePrayerActive: (id: string) => void;
   pickRandomPrayer: (category: PrayerCategoryId) => PrayerTemplate | null;
 
-  // High-Tier Arabic + Turkish Duas CRUD (150-299 coins)
+  // High-Tier Arabic + Turkish Duas CRUD (36–199 coins)
   addHighTierDua: (input: Omit<HighTierDuaEntry, 'id' | 'updatedAt'>) => void;
   updateHighTierDua: (id: string, patch: Partial<Omit<HighTierDuaEntry, 'id'>>) => void;
   deleteHighTierDua: (id: string) => void;
@@ -246,10 +248,58 @@ function dedupeEventsById(events: QueueEvent[]): QueueEvent[] {
   return unique;
 }
 
+function migrateLegacyTierRules(
+  savedRules?: Partial<TierRuleConfig> | null
+): Partial<TierRuleConfig> | undefined {
+  if (!savedRules) return undefined;
+  const matchesLegacyDefaults =
+    savedRules.smallGiftMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.smallGiftMinCoins &&
+    savedRules.smallGiftMaxCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.smallGiftMaxCoins &&
+    savedRules.midGiftMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.midGiftMinCoins &&
+    savedRules.midGiftMaxCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.midGiftMaxCoins &&
+    savedRules.highGiftMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.highGiftMinCoins &&
+    savedRules.highGiftMaxCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.highGiftMaxCoins &&
+    savedRules.yasinMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.yasinMinCoins;
+
+  if (!matchesLegacyDefaults) {
+    return savedRules;
+  }
+
+  return {
+    ...savedRules,
+    smallGiftMinCoins: DEFAULT_TIER_RULES.smallGiftMinCoins,
+    smallGiftMaxCoins: DEFAULT_TIER_RULES.smallGiftMaxCoins,
+    midGiftMinCoins: DEFAULT_TIER_RULES.midGiftMinCoins,
+    midGiftMaxCoins: DEFAULT_TIER_RULES.midGiftMaxCoins,
+    highGiftMinCoins: DEFAULT_TIER_RULES.highGiftMinCoins,
+    highGiftMaxCoins: DEFAULT_TIER_RULES.highGiftMaxCoins,
+    yasinMinCoins: DEFAULT_TIER_RULES.yasinMinCoins,
+  };
+}
+
 function recoverInitialState(): AppState {
   const defaults = createDefaultAppState();
   const saved = loadLocalState();
-  if (!saved) return defaults;
+  const activeManagerSnapshot = sharedTikTokConnectionManager.hasActiveLiveSession()
+    ? sharedTikTokConnectionManager.getLatestStatus()
+    : null;
+  if (!saved) {
+    return activeManagerSnapshot
+      ? {
+          ...defaults,
+          tiktok: {
+            ...defaults.tiktok,
+            connectionState: activeManagerSnapshot.state,
+            roomId: activeManagerSnapshot.roomId ?? null,
+            viewerCount: activeManagerSnapshot.viewerCount ?? null,
+            followerCount: activeManagerSnapshot.followerCount ?? null,
+            lastEvent: activeManagerSnapshot.lastEvent ?? null,
+            lastError: activeManagerSnapshot.error ?? null,
+            lastCheckedAt: activeManagerSnapshot.updatedAt,
+          },
+        }
+      : defaults;
+  }
 
   const uniqueHistory = Array.isArray(saved.history) ? dedupeEventsById(saved.history) : [];
   const historyIds = new Set(uniqueHistory.map((h) => h.id));
@@ -345,7 +395,7 @@ function recoverInitialState(): AppState {
     ...saved,
     prayers: mergedPrayers,
     gifts: Array.isArray(saved.gifts) && saved.gifts.length > 0 ? saved.gifts : defaults.gifts,
-    tierRules: resolveTierRules(saved.tierRules),
+    tierRules: resolveTierRules(migrateLegacyTierRules(saved.tierRules)),
     highTierDuas: savedHighTier,
     yasinRecitation: mergedYasin,
     queue: recoveredQueue,
@@ -396,12 +446,18 @@ function recoverInitialState(): AppState {
       ...defaults.tiktok,
       ...(saved.tiktok || {}),
       username: sanitizeTikTokHandle(saved.tiktok?.username || '') || defaults.tiktok.username,
-      // Never auto-claim connected state from stale cache
-      connectionState: saved.tiktok?.connectorEndpoint?.trim() ? 'disconnected' : 'unconfigured',
-      roomId: null,
-      viewerCount: null,
-      followerCount: null,
-      lastEvent: null,
+      // Never auto-claim connected state from stale cache; only reflect an actually open app-wide live session
+      connectionState: activeManagerSnapshot
+        ? activeManagerSnapshot.state
+        : saved.tiktok?.connectorEndpoint?.trim()
+        ? 'disconnected'
+        : 'unconfigured',
+      roomId: activeManagerSnapshot ? activeManagerSnapshot.roomId ?? null : null,
+      viewerCount: activeManagerSnapshot ? activeManagerSnapshot.viewerCount ?? null : null,
+      followerCount: activeManagerSnapshot ? activeManagerSnapshot.followerCount ?? null : null,
+      lastEvent: activeManagerSnapshot ? activeManagerSnapshot.lastEvent ?? null : null,
+      lastError: activeManagerSnapshot ? activeManagerSnapshot.error ?? null : null,
+      lastCheckedAt: activeManagerSnapshot ? activeManagerSnapshot.updatedAt : saved.tiktok?.lastCheckedAt ?? null,
     },
     broadcast: { ...defaults.broadcast, ...(saved.broadcast || {}) },
     logs: Array.isArray(saved.logs) ? saved.logs : defaults.logs,
@@ -454,7 +510,6 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const playbackHandleRef = useRef<Stage2PlaybackHandle | null>(null);
   const holdTimeoutRef = useRef<number | null>(null);
   const lastBroadcastSyncRef = useRef<number>(0);
-  const tiktokConnectorRef = useRef<TikTokLiveConnectorService | null>(null);
 
   useEffect(() => {
     const existingEvents = [...stateRef.current.queue, ...stateRef.current.history];
@@ -1139,7 +1194,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       let yasinAudioSha256: string | undefined;
 
       if (tier === 'small_gift') {
-        // 1-49 coins: greeting ONLY, strictly no prayer
+        // 1–10 coins: greeting ONLY, strictly no prayer
         category = 'general_blessings';
         prayerId = 'tier-small-greeting';
         prayerTitle = 'Küçük Hediye Selamlaması';
@@ -1147,7 +1202,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           classification.renderedGreeting ||
           renderPersonalizedPrayer(resolveTierRules(current.tierRules).smallGiftGreetingTemplate, safeUser);
       } else if (tier === 'mid_gift') {
-        // 50-149 coins: random from Başlangıç Duaları pool, never consecutive repeat
+        // 11–35 coins: random from Başlangıç Duaları pool, never consecutive repeat
         const pickedMid = pickNonConsecutiveMidPrayer(current.prayers, lastMidPrayerIdRef.current);
         if (!pickedMid) {
           appendLog('error', 'queue', 'Başlangıç Duaları havuzunda aktif dua bulunamadı.');
@@ -1159,13 +1214,13 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         prayerTitle = pickedMid.title;
         renderedPrayer = renderPersonalizedPrayer(pickedMid.template, safeUser);
       } else if (tier === 'high_gift') {
-        // 150-299 coins (high_gift): verified Arabic harekeli dua + Qari audio + family/parents/relatives dua
+        // 36–199 coins (high_gift): verified Arabic harekeli dua + Qari audio + family/parents/relatives dua
         const pickedHigh = pickNonConsecutiveHighDua(
           current.highTierDuas || [],
           lastHighDuaIdRef.current
         );
         if (!pickedHigh) {
-          appendLog('error', 'queue', 'Yüksek seviye (150-299 jeton) aktif dua bulunamadı.');
+          appendLog('error', 'queue', 'Yüksek seviye (36–199 jeton) aktif dua bulunamadı.');
           return { ok: false, reason: 'Yüksek seviye dua havuzunda aktif kayıt bulunamadı.' };
         }
         lastHighDuaIdRef.current = pickedHigh.id;
@@ -1185,7 +1240,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           pickedHigh.turkishMeaning
         );
       } else {
-        // 300+ coins (yasin_300): single atomic 3-phase Yâsîn-i Şerîf sequence led by Hacı Ahmet Efendi (scholar_1)
+        // 200+ coins (yasin_300): single atomic 3-phase Yâsîn-i Şerîf sequence led by Hacı Ahmet Efendi (scholar_1)
         // Strict rule: NO Turkish meal is ever attached, displayed on screen, or sent to any TTS engine for Yâsîn.
         const yasinCfg = current.yasinRecitation || DEFAULT_YASIN_RECITATION;
         category = 'general_blessings';
@@ -2018,27 +2073,35 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     [enqueueGiftEvent, enqueueFollowEvent, appendLog]
   );
 
-  // Persistent TikTokLiveConnectorService lifecycle (Admin view only)
+  // Attach callbacks to centralized app-wide SharedTikTokConnectionManager (Admin / In-App Studio).
+  // NEVER disposes or disconnects the active live session on React StrictMode cleanup or view transitions.
   useEffect(() => {
     if (isBroadcastView) return;
 
-    const connector = new TikTokLiveConnectorService(
-      stateRef.current.tiktok,
-      createConnectorCallbacks()
-    );
+    const callbacks = createConnectorCallbacks();
+    sharedTikTokConnectionManager.attachCallbacks(callbacks);
 
-    tiktokConnectorRef.current = connector;
+    if (sharedTikTokConnectionManager.hasActiveLiveSession()) {
+      callbacks.onStatusChange(sharedTikTokConnectionManager.getLatestStatus());
+    } else {
+      sharedTikTokConnectionManager.updateConfig({
+        username: stateRef.current.tiktok.username,
+        connectorEndpoint: stateRef.current.tiktok.connectorEndpoint,
+        autoReconnect: stateRef.current.tiktok.autoReconnect,
+        maxRetries: stateRef.current.tiktok.maxRetries,
+        retryDelaySec: stateRef.current.tiktok.retryDelaySec,
+        duplicateWindowSec: stateRef.current.tiktok.duplicateWindowSec,
+      });
+    }
+
     return () => {
-      connector.dispose();
-      if (tiktokConnectorRef.current === connector) {
-        tiktokConnectorRef.current = null;
-      }
+      sharedTikTokConnectionManager.detachCallbacks(callbacks);
     };
   }, [isBroadcastView, createConnectorCallbacks]);
 
   useEffect(() => {
     if (isBroadcastView) return;
-    tiktokConnectorRef.current?.updateConfig({
+    sharedTikTokConnectionManager.updateConfig({
       username: state.tiktok.username,
       connectorEndpoint: state.tiktok.connectorEndpoint,
       autoReconnect: state.tiktok.autoReconnect,
@@ -2085,17 +2148,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const attemptTikTokConnect = useCallback(async () => {
     const tk = stateRef.current.tiktok;
     const callbacks = createConnectorCallbacks();
-    const connector =
-      tiktokConnectorRef.current || new TikTokLiveConnectorService(tk, callbacks);
-
-    connector.updateCallbacks(callbacks);
-    if (!tiktokConnectorRef.current) {
-      tiktokConnectorRef.current = connector;
-    }
+    sharedTikTokConnectionManager.attachCallbacks(callbacks);
 
     setSimulationStreamActive(false);
-    connector.updateConfig(tk);
-    const result = await connector.connect(tk.username);
+    const result = await sharedTikTokConnectionManager.connect(tk.username, tk);
     if (!result.ok && result.error) {
       appendLog('warning', 'tiktok', result.error);
     }
@@ -2105,15 +2161,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const reconnectTikTok = useCallback(async () => {
     const tk = stateRef.current.tiktok;
     const callbacks = createConnectorCallbacks();
-    const connector =
-      tiktokConnectorRef.current || new TikTokLiveConnectorService(tk, callbacks);
-    connector.updateCallbacks(callbacks);
-    if (!tiktokConnectorRef.current) {
-      tiktokConnectorRef.current = connector;
-    }
+    sharedTikTokConnectionManager.attachCallbacks(callbacks);
+
     setSimulationStreamActive(false);
-    connector.updateConfig(tk);
-    const result = await connector.reconnect(tk.username);
+    const result = await sharedTikTokConnectionManager.reconnect(tk.username, tk);
     if (!result.ok && result.error) {
       appendLog('warning', 'tiktok', `TikTok LIVE yeniden bağlanma hatası: ${result.error}`);
     } else {
@@ -2124,13 +2175,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
 
   const checkRelayHealth = useCallback(async (explicitEndpoint?: string) => {
     const tk = stateRef.current.tiktok;
-    const connector =
-      tiktokConnectorRef.current || new TikTokLiveConnectorService(tk, createConnectorCallbacks());
-    connector.updateConfig({
+    sharedTikTokConnectionManager.updateConfig({
       ...tk,
       ...(explicitEndpoint !== undefined ? { connectorEndpoint: explicitEndpoint } : {}),
     });
-    const res = await connector.checkHealth(explicitEndpoint);
+    const res = await sharedTikTokConnectionManager.checkHealth(explicitEndpoint);
     appendLog(
       res.ok ? 'info' : 'warning',
       'tiktok',
@@ -2139,25 +2188,21 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         : `Relay sağlık testi başarısız: ${res.error || 'Bilinmeyen hata'}`
     );
     return res;
-  }, [appendLog, createConnectorCallbacks]);
+  }, [appendLog]);
 
   const disconnectTikTok = useCallback(async () => {
     setSimulationStreamActive(false);
-    const connector = tiktokConnectorRef.current;
-    if (connector) {
-      await connector.disconnect();
-    } else {
-      setState((prev) => ({
-        ...prev,
-        tiktok: {
-          ...prev.tiktok,
-          connectionState: prev.tiktok.connectorEndpoint ? 'disconnected' : 'unconfigured',
-          roomId: null,
-          viewerCount: null,
-          lastError: null,
-        },
-      }));
-    }
+    await sharedTikTokConnectionManager.disconnect();
+    setState((prev) => ({
+      ...prev,
+      tiktok: {
+        ...prev.tiktok,
+        connectionState: prev.tiktok.connectorEndpoint ? 'disconnected' : 'unconfigured',
+        roomId: null,
+        viewerCount: null,
+        lastError: null,
+      },
+    }));
     appendLog('info', 'tiktok', 'TikTok LIVE connector disconnected.');
   }, [appendLog]);
 
@@ -2168,20 +2213,15 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   const startSimulationSseListener = useCallback(() => {
     const tk = stateRef.current.tiktok;
     const callbacks = createConnectorCallbacks();
-    const connector =
-      tiktokConnectorRef.current || new TikTokLiveConnectorService(tk, callbacks);
-    connector.updateCallbacks(callbacks);
-    connector.updateConfig(tk);
-    if (!tiktokConnectorRef.current) {
-      tiktokConnectorRef.current = connector;
-    }
-    const res = connector.connectSimulationStream(tk.username);
+    sharedTikTokConnectionManager.attachCallbacks(callbacks);
+    sharedTikTokConnectionManager.updateConfig(tk);
+    const res = sharedTikTokConnectionManager.connectSimulationStream(tk.username);
     setSimulationStreamActive(res.ok);
     return res;
   }, [createConnectorCallbacks]);
 
   const stopSimulationSseListener = useCallback(() => {
-    tiktokConnectorRef.current?.stopSimulationStream();
+    sharedTikTokConnectionManager.stopSimulationStream();
     setSimulationStreamActive(false);
     appendLog('info', 'tiktok', 'Simülasyon SSE test akışı durduruldu.');
   }, [appendLog]);
@@ -2208,7 +2248,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       }
 
       if (
-        !tiktokConnectorRef.current?.isSimulationStreamActive &&
+        !sharedTikTokConnectionManager.isSimulationStreamActive() &&
         tk.connectionState !== 'connected'
       ) {
         startSimulationSseListener();

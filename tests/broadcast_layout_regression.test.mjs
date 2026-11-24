@@ -62,13 +62,13 @@ test('1. Top horizontal coin-tier bar defines exact 4 boxes in order with 3rd bo
     [
       { range: '1–10', unitLabel: 'JETON', label: 'Selamlama' },
       { range: '11–35', unitLabel: 'JETON', label: 'Açılış duası' },
-      { range: '36–60 · 61–199', unitLabel: 'JETON', label: 'Kapsamlı dua' },
-      { range: '200+', unitLabel: 'JETON', label: 'Yâsîn' },
+      { range: '36–199', unitLabel: 'JETON', label: 'Kapsamlı dua' },
+      { range: '200+', unitLabel: 'JETON', label: 'Yâsîn-i Şerîf' },
     ]
   );
 
-  // 3rd box (36–60 · 61–199 Kapsamlı dua) MUST be strictly wider than boxes 1, 2, 4
-  assert.equal(TOP_TIER_BAR_GRID_COLUMNS, '0.85fr 1fr 1.5fr 0.85fr');
+  // 3rd box (36–199 Kapsamlı dua) MUST be widest while keeping all 4 boxes crisp and readable
+  assert.equal(TOP_TIER_BAR_GRID_COLUMNS, '0.85fr 1fr 1.15fr 1.05fr');
   assert.ok(TOP_TIER_BAR_ITEMS[2].weight > TOP_TIER_BAR_ITEMS[0].weight);
   assert.ok(TOP_TIER_BAR_ITEMS[2].weight > TOP_TIER_BAR_ITEMS[1].weight);
   assert.ok(TOP_TIER_BAR_ITEMS[2].weight > TOP_TIER_BAR_ITEMS[3].weight);

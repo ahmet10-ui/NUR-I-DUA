@@ -52,14 +52,26 @@ import {
 } from '../services/ttsService';
 import { isNativeAndroidEnvironment } from '../services/nativeAndroidTtsBridge';
 import {
+  createRestingLipSyncFrame,
+  scalarLevelToLipSyncFrame,
+} from '../services/turkishLipSync';
+import {
+  createDefaultScholarAnimations,
+  isSupplicationEvent,
+  prepareDuaSpeechPlan,
+  ScholarAnimationDirector,
+} from '../services/scholarAnimationController';
+import {
   AppState,
   BroadcastSettingsConfig,
   EventSource,
   GiftRule,
   HighTierDuaEntry,
+  LipSyncFrame,
   PrayerCategoryId,
   PrayerTemplate,
   QueueEvent,
+  ScholarAnimationSnapshot,
   ScholarId,
   ScholarSettingsConfig,
   SystemLogEntry,
@@ -78,6 +90,8 @@ import {
 } from '../utils/sanitize';
 
 type MouthListener = (level: number) => void;
+type LipSyncListener = (frame: LipSyncFrame) => void;
+type ScholarAnimationListener = (states: Record<ScholarId, ScholarAnimationSnapshot>) => void;
 
 interface EnqueueResult {
   ok: boolean;
@@ -99,6 +113,8 @@ interface StudioContextValue {
   unlockAudioByGesture: () => void;
   refreshVoices: () => void;
   subscribeMouthLevel: (fn: MouthListener) => () => void;
+  subscribeLipSyncFrame: (fn: LipSyncListener) => () => void;
+  subscribeScholarAnimation: (fn: ScholarAnimationListener) => () => void;
 
   // Prayer CRUD
   addPrayer: (input: { title: string; category: PrayerCategoryId; template: string; isActive: boolean }) => void;
@@ -253,12 +269,15 @@ function migrateLegacyTierRules(
 ): Partial<TierRuleConfig> | undefined {
   if (!savedRules) return undefined;
   const matchesLegacyDefaults =
-    savedRules.smallGiftMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.smallGiftMinCoins &&
+    (savedRules.smallGiftMinCoins === undefined ||
+      savedRules.smallGiftMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.smallGiftMinCoins) &&
     savedRules.smallGiftMaxCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.smallGiftMaxCoins &&
     savedRules.midGiftMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.midGiftMinCoins &&
-    savedRules.midGiftMaxCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.midGiftMaxCoins &&
+    (savedRules.midGiftMaxCoins === undefined ||
+      savedRules.midGiftMaxCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.midGiftMaxCoins) &&
     savedRules.highGiftMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.highGiftMinCoins &&
-    savedRules.highGiftMaxCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.highGiftMaxCoins &&
+    (savedRules.highGiftMaxCoins === undefined ||
+      savedRules.highGiftMaxCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.highGiftMaxCoins) &&
     savedRules.yasinMinCoins === LEGACY_DEFAULT_TIER_THRESHOLDS.yasinMinCoins;
 
   if (!matchesLegacyDefaults) {
@@ -499,6 +518,17 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
   playbackStartedRef.current = playbackStarted;
 
   const mouthListenersRef = useRef<Set<MouthListener>>(new Set());
+  const lipSyncListenersRef = useRef<Set<LipSyncListener>>(new Set());
+  const scholarAnimListenersRef = useRef<Set<ScholarAnimationListener>>(new Set());
+  const animationDirectorRef = useRef<ScholarAnimationDirector | null>(null);
+  if (!animationDirectorRef.current) {
+    animationDirectorRef.current = new ScholarAnimationDirector();
+  }
+  const remoteScholarAnimationRef = useRef<Record<ScholarId, ScholarAnimationSnapshot>>(
+    createDefaultScholarAnimations()
+  );
+  const duaClosingHandleRef = useRef<{ cancel: () => void } | null>(null);
+  const activeTestClosingHandleRef = useRef<{ cancel: () => void } | null>(null);
   const recentDedupeRef = useRef<Map<string, number>>(loadPersistedTimestampMap(REAL_DEDUPE_STORAGE_KEY));
   const seenFollowerKeysRef = useRef<Set<string>>(
     new Set(loadPersistedTimestampMap(SEEN_FOLLOWS_STORAGE_KEY).keys())
@@ -530,9 +560,41 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     setHasUserGesture(true);
   }, []);
 
-  const emitMouthLevel = useCallback((level: number) => {
-    mouthListenersRef.current.forEach((fn) => fn(level));
+  const emitLipSyncFrame = useCallback((frame: LipSyncFrame) => {
+    lipSyncListenersRef.current.forEach((fn) => fn(frame));
+    mouthListenersRef.current.forEach((fn) => fn(frame.level));
   }, []);
+
+  const emitScholarAnimation = useCallback(
+    (states: Record<ScholarId, ScholarAnimationSnapshot>) => {
+      remoteScholarAnimationRef.current = states;
+      scholarAnimListenersRef.current.forEach((fn) => fn(states));
+    },
+    []
+  );
+
+  useEffect(() => {
+    const director = animationDirectorRef.current;
+    if (!director) return;
+    return director.subscribe((states) => {
+      if (!isBroadcastView) {
+        emitScholarAnimation(states);
+      }
+    });
+  }, [emitScholarAnimation, isBroadcastView]);
+
+  const emitMouthLevel = useCallback(
+    (level: number) => {
+      const scholarId =
+        activeEventRef.current?.scholarId || stateRef.current.scholars.currentSpeaker;
+      const frame =
+        level <= 0.025
+          ? createRestingLipSyncFrame(scholarId)
+          : scalarLevelToLipSyncFrame(level, scholarId);
+      emitLipSyncFrame(frame);
+    },
+    [emitLipSyncFrame]
+  );
 
   const subscribeMouthLevel = useCallback((fn: MouthListener) => {
     mouthListenersRef.current.add(fn);
@@ -540,6 +602,27 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       mouthListenersRef.current.delete(fn);
     };
   }, []);
+
+  const subscribeLipSyncFrame = useCallback((fn: LipSyncListener) => {
+    lipSyncListenersRef.current.add(fn);
+    return () => {
+      lipSyncListenersRef.current.delete(fn);
+    };
+  }, []);
+
+  const subscribeScholarAnimation = useCallback(
+    (fn: ScholarAnimationListener) => {
+      scholarAnimListenersRef.current.add(fn);
+      const current = isBroadcastView
+        ? remoteScholarAnimationRef.current
+        : animationDirectorRef.current?.getSnapshots() || createDefaultScholarAnimations();
+      fn(current);
+      return () => {
+        scholarAnimListenersRef.current.delete(fn);
+      };
+    },
+    [isBroadcastView]
+  );
 
   const refreshVoices = useCallback(() => {
     if (!browserTTSProvider.isSupported()) {
@@ -605,6 +688,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         window.clearTimeout(holdTimeoutRef.current);
         holdTimeoutRef.current = null;
       }
+      duaClosingHandleRef.current?.cancel();
+      duaClosingHandleRef.current = null;
+      activeTestClosingHandleRef.current?.cancel();
+      activeTestClosingHandleRef.current = null;
+      animationDirectorRef.current?.safeUnwindToIdle();
       playbackHandleRef.current?.cancel();
       playbackHandleRef.current = null;
       verifiedArabicAudioPlayer.stop();
@@ -638,12 +726,29 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     fetchServerState().then((res) => {
       if (!mounted || !res) return;
       if (isBroadcastView && res.appState) {
-        setState((prev) => ({ ...prev, ...res.appState }));
+        setState((prev) => ({
+          ...prev,
+          ...res.appState,
+          tierRules: resolveTierRules(migrateLegacyTierRules(res.appState?.tierRules)),
+        }));
       }
       if (isBroadcastView && res.livePlayback) {
         setActiveEvent(res.livePlayback.activeEvent);
         setSpeakingState(res.livePlayback.speakingState);
         setPlaybackStarted(Boolean(res.livePlayback.playbackStarted));
+        if (res.livePlayback.scholarAnimation) {
+          emitScholarAnimation({
+            ...createDefaultScholarAnimations(),
+            ...res.livePlayback.scholarAnimation,
+          });
+        }
+        if (res.livePlayback.activeEvent?.playbackPhase === 'arabic_audio') {
+          emitLipSyncFrame(createRestingLipSyncFrame(res.livePlayback.activeScholar));
+        } else if (res.livePlayback.lipSyncFrame) {
+          emitLipSyncFrame(res.livePlayback.lipSyncFrame);
+        } else if (res.livePlayback.mouthLevel) {
+          emitMouthLevel(res.livePlayback.mouthLevel);
+        }
       }
     });
 
@@ -651,7 +756,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       onState: (incoming) => {
         if (!mounted) return;
         if (isBroadcastView) {
-          setState(incoming);
+          setState({
+            ...incoming,
+            tierRules: resolveTierRules(migrateLegacyTierRules(incoming?.tierRules)),
+          });
         }
       },
       onLivePlayback: (payload) => {
@@ -659,7 +767,25 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         setActiveEvent(payload.activeEvent);
         setSpeakingState(payload.speakingState);
         setPlaybackStarted(Boolean(payload.playbackStarted));
-        emitMouthLevel(payload.mouthLevel || 0);
+        let activeMouthAllowed = payload.speakingState === 'speaking';
+        if (payload.scholarAnimation) {
+          const mergedAnim = {
+            ...createDefaultScholarAnimations(),
+            ...payload.scholarAnimation,
+          };
+          emitScholarAnimation(mergedAnim);
+          const activeAnim = mergedAnim[payload.activeScholar];
+          if (activeAnim) {
+            activeMouthAllowed = activeAnim.mouthAllowed;
+          }
+        }
+        if (payload.activeEvent?.playbackPhase === 'arabic_audio' || !activeMouthAllowed) {
+          emitLipSyncFrame(createRestingLipSyncFrame(payload.activeScholar));
+        } else if (payload.lipSyncFrame) {
+          emitLipSyncFrame(payload.lipSyncFrame);
+        } else {
+          emitMouthLevel(payload.mouthLevel || 0);
+        }
       },
     });
 
@@ -667,7 +793,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       mounted = false;
       unsub();
     };
-  }, [isBroadcastView, emitMouthLevel]);
+  }, [isBroadcastView, emitLipSyncFrame, emitMouthLevel, emitScholarAnimation]);
 
   const appendLog = useCallback(
     (level: SystemLogEntry['level'], source: SystemLogEntry['source'], message: string) => {
@@ -769,7 +895,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     return picked;
   }, []);
 
-  // High-Tier Arabic + Turkish Duas CRUD (150-299 coins)
+  // High-Tier Arabic + Turkish Duas CRUD (36–199 jeton)
   const addHighTierDua = useCallback(
     (input: Omit<HighTierDuaEntry, 'id' | 'updatedAt'>) => {
       const now = new Date().toISOString();
@@ -1342,6 +1468,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     const nextPending = state.queue.find((q) => q.status === 'pending');
     if (!nextPending) return;
 
+    // Cancel any lingering voice-test closing gesture before claiming the stage
+    activeTestClosingHandleRef.current?.cancel();
+    activeTestClosingHandleRef.current = null;
+    duaClosingHandleRef.current?.cancel();
+    duaClosingHandleRef.current = null;
+
     // Mark event as speaking
     const startedEvent: QueueEvent = {
       ...nextPending,
@@ -1358,11 +1490,27 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       startedAt: new Date().toISOString(),
     };
 
+    const isSupplication = isSupplicationEvent(startedEvent, startedEvent.renderedPrayer);
+    const duaPlan = prepareDuaSpeechPlan(startedEvent.renderedPrayer, {
+      isSupplication,
+      isYasinClosing: startedEvent.tier === 'yasin_300',
+    });
+    const playbackEvent: QueueEvent =
+      duaPlan.bodyText && duaPlan.bodyText !== startedEvent.renderedPrayer
+        ? { ...startedEvent, renderedPrayer: duaPlan.bodyText }
+        : startedEvent;
+
     playbackStartedRef.current = false;
     setPlaybackStarted(false);
     setActiveEvent(startedEvent);
     setSpeakingState('speaking');
     setIsSpeechPaused(false);
+
+    if (startedEvent.playbackPhase === 'arabic_audio') {
+      animationDirectorRef.current?.setSpeechPhase(startedEvent.scholarId, 'IDLE');
+    } else {
+      animationDirectorRef.current?.setSpeechPhase(startedEvent.scholarId, 'SPEAKING');
+    }
 
     setState((prev) => ({
       ...prev,
@@ -1377,7 +1525,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       activeEvent: startedEvent,
       speakingState: 'speaking',
       activeScholar: startedEvent.scholarId,
-      mouthLevel: 0.4,
+      mouthLevel: 0,
+      lipSyncFrame: createRestingLipSyncFrame(startedEvent.scholarId),
+      scholarAnimation: animationDirectorRef.current?.getSnapshots(),
       playbackStarted: false,
     });
 
@@ -1393,7 +1543,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       pitch: voiceCfg.scholar1Pitch,
     });
     const isAndroidNative = isNativeAndroidEnvironment();
-    const chosenScholar1Engine =
+    const chosenScholar1Engine: 'ema_lightning' | 'seslen_hasan' | 'zerre_ses_a' =
       voiceCfg.scholar1Engine === 'ema_lightning'
         ? 'ema_lightning'
         : voiceCfg.scholar1Engine === 'zerre_ses_a'
@@ -1426,39 +1576,81 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       );
     }
 
+    const baseTtsOptions = {
+      scholarId: startedEvent.scholarId,
+      scholar1Engine: startedEvent.scholarId === 'scholar_1' ? chosenScholar1Engine : undefined,
+      emaFallbackToHasan: voiceCfg.emaLightningFallbackToHasan,
+      zerreFallbackToHasan: voiceCfg.zerreSesAFallbackToHasan,
+      zerreApproved: voiceCfg.zerreSesAApproved,
+      preferredEngine: voiceCfg.provider,
+      voiceURI: chosenVoiceURI,
+      neuralProviderId: voiceCfg.neuralProviderId,
+      neuralVoiceId: chosenNeuralVoiceId,
+      tone: voiceCfg.narrationTone,
+      fallbackToBrowser: voiceCfg.fallbackToBrowser,
+      forbiddenMealText:
+        startedEvent.tier === 'yasin_300'
+          ? stateRef.current.yasinRecitation?.turkishMealNotice || undefined
+          : startedEvent.turkishMeaning,
+      lang: voiceCfg.language || 'tr-TR',
+      rate: effectiveRate,
+      pitch: prosody.pitch,
+      volume: voiceCfg.volume,
+    };
+
+    const finalizeCompletedQueueItem = () => {
+      const restingFrame = createRestingLipSyncFrame(startedEvent.scholarId);
+      animationDirectorRef.current?.setSpeechPhase(startedEvent.scholarId, 'IDLE');
+      const completed: QueueEvent = {
+        ...startedEvent,
+        status: 'completed',
+        completedAt: new Date().toISOString(),
+      };
+      setState((prev) => ({
+        ...prev,
+        queue: prev.queue.filter((item) => item.id !== startedEvent.id),
+        history: dedupeEventsById([completed, ...prev.history]).slice(0, 200),
+        stats: {
+          ...prev.stats,
+          totalPrayers: prev.stats.totalPrayers + 1,
+        },
+        lastUpdatedAt: new Date().toISOString(),
+      }));
+      setActiveEvent(null);
+      setSpeakingState('idle');
+      setPlaybackStarted(false);
+      playbackStartedRef.current = false;
+      pushLivePlayback({
+        activeEvent: null,
+        speakingState: 'idle',
+        activeScholar: startedEvent.scholarId,
+        mouthLevel: 0,
+        lipSyncFrame: restingFrame,
+        scholarAnimation: animationDirectorRef.current?.getSnapshots(),
+        playbackStarted: false,
+      });
+    };
+
     setLastSpeechError(null);
     let handle: Stage2PlaybackHandle | null = null;
     let settledSynchronously = false;
     let outcomeSettled = false;
     let currentPhase: QueueEvent['playbackPhase'] = startedEvent.playbackPhase;
     handle = executeStage2PlaybackSequence({
-      event: startedEvent,
+      event: playbackEvent,
       arabicPlayer: verifiedArabicAudioPlayer,
       turkishTts: studioTTSRouter,
       arabicStartTimeoutMs: startedEvent.tier === 'yasin_300' ? 20000 : 12000,
-      ttsOptions: {
-        scholarId: startedEvent.scholarId,
-        scholar1Engine: startedEvent.scholarId === 'scholar_1' ? chosenScholar1Engine : undefined,
-        emaFallbackToHasan: voiceCfg.emaLightningFallbackToHasan,
-        zerreFallbackToHasan: voiceCfg.zerreSesAFallbackToHasan,
-        zerreApproved: voiceCfg.zerreSesAApproved,
-        preferredEngine: voiceCfg.provider,
-        voiceURI: chosenVoiceURI,
-        neuralProviderId: voiceCfg.neuralProviderId,
-        neuralVoiceId: chosenNeuralVoiceId,
-        tone: voiceCfg.narrationTone,
-        fallbackToBrowser: voiceCfg.fallbackToBrowser,
-        forbiddenMealText:
-          startedEvent.tier === 'yasin_300'
-            ? stateRef.current.yasinRecitation?.turkishMealNotice || undefined
-            : startedEvent.turkishMeaning,
-        lang: voiceCfg.language || 'tr-TR',
-        rate: effectiveRate,
-        pitch: prosody.pitch,
-        volume: voiceCfg.volume,
-      },
+      ttsOptions: baseTtsOptions,
       onPhaseChange: (phase) => {
         currentPhase = phase;
+        const restingFrame = createRestingLipSyncFrame(startedEvent.scholarId);
+        if (phase === 'arabic_audio') {
+          animationDirectorRef.current?.setSpeechPhase(startedEvent.scholarId, 'IDLE');
+          emitLipSyncFrame(restingFrame);
+        } else {
+          animationDirectorRef.current?.setSpeechPhase(startedEvent.scholarId, 'SPEAKING');
+        }
         setActiveEvent((prev) =>
           prev && prev.id === startedEvent.id ? { ...prev, playbackPhase: phase } : prev
         );
@@ -1466,7 +1658,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           activeEvent: { ...startedEvent, playbackPhase: phase },
           speakingState: 'speaking',
           activeScholar: startedEvent.scholarId,
-          mouthLevel: 0.25,
+          mouthLevel: 0,
+          lipSyncFrame: restingFrame,
+          scholarAnimation: animationDirectorRef.current?.getSnapshots(),
           playbackStarted: playbackStartedRef.current,
         });
       },
@@ -1474,27 +1668,38 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         playbackStartedRef.current = true;
         setPlaybackStarted(true);
         setSpeakingState('speaking');
+        const restingFrame = createRestingLipSyncFrame(startedEvent.scholarId);
         pushLivePlayback({
           activeEvent: activeEventRef.current || startedEvent,
           speakingState: 'speaking',
           activeScholar: startedEvent.scholarId,
-          mouthLevel: 0.35,
+          mouthLevel: 0,
+          lipSyncFrame: restingFrame,
+          scholarAnimation: animationDirectorRef.current?.getSnapshots(),
           playbackStarted: true,
         });
       },
       onFallbackNotice: (reason) => {
         appendLog('warning', 'tts', reason);
       },
-      onMouthLevel: (level) => {
-        emitMouthLevel(level);
+      onLipSyncFrame: (frame) => {
+        if (currentPhase === 'arabic_audio') {
+          animationDirectorRef.current?.setSpeechPhase(startedEvent.scholarId, 'IDLE');
+          emitLipSyncFrame(createRestingLipSyncFrame(startedEvent.scholarId));
+          return;
+        }
+        animationDirectorRef.current?.syncFromLipSyncFrame(startedEvent.scholarId, frame, true);
+        emitLipSyncFrame(frame);
         const now = performance.now();
-        if (now - lastBroadcastSyncRef.current > 120) {
+        if (!frame.active || now - lastBroadcastSyncRef.current > 85) {
           lastBroadcastSyncRef.current = now;
           pushLivePlayback({
             activeEvent: activeEventRef.current || startedEvent,
             speakingState: 'speaking',
             activeScholar: startedEvent.scholarId,
-            mouthLevel: level,
+            mouthLevel: frame.level,
+            lipSyncFrame: frame,
+            scholarAnimation: animationDirectorRef.current?.getSnapshots(),
             playbackStarted: playbackStartedRef.current,
           });
         }
@@ -1506,7 +1711,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         if (!handle || playbackHandleRef.current === handle) {
           playbackHandleRef.current = null;
         }
-        emitMouthLevel(0);
+        const restingFrame = createRestingLipSyncFrame(startedEvent.scholarId);
+        emitLipSyncFrame(restingFrame);
         playbackStartedRef.current = false;
         setPlaybackStarted(false);
         setSpeakingState('holding');
@@ -1515,42 +1721,78 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           speakingState: 'holding',
           activeScholar: startedEvent.scholarId,
           mouthLevel: 0,
+          lipSyncFrame: restingFrame,
+          scholarAnimation: animationDirectorRef.current?.getSnapshots(),
           playbackStarted: false,
         });
 
         if (holdTimeoutRef.current !== null) {
           window.clearTimeout(holdTimeoutRef.current);
-        }
-        const holdMs = Math.max(500, (stateRef.current.broadcast.postSpeechHoldSec || 2.5) * 1000);
-        holdTimeoutRef.current = window.setTimeout(() => {
           holdTimeoutRef.current = null;
-          const completed: QueueEvent = {
-            ...startedEvent,
-            status: 'completed',
-            completedAt: new Date().toISOString(),
-          };
-          setState((prev) => ({
-            ...prev,
-            queue: prev.queue.filter((item) => item.id !== startedEvent.id),
-            history: dedupeEventsById([completed, ...prev.history]).slice(0, 200),
-            stats: {
-              ...prev.stats,
-              totalPrayers: prev.stats.totalPrayers + 1,
+        }
+
+        if (duaPlan.hasDuaClosingGesture && animationDirectorRef.current) {
+          duaClosingHandleRef.current = animationDirectorRef.current.runDuaClosingSequence({
+            scholarId: startedEvent.scholarId,
+            ameenText: duaPlan.ameenText || 'Âmin.',
+            speakAmeen: (ameenText, cb) => {
+              studioTTSRouter.speak(ameenText, {
+                ...baseTtsOptions,
+                rate: Math.max(0.76, (baseTtsOptions.rate || 0.94) * 0.9),
+                onFallbackNotice: (reason) => appendLog('warning', 'tts', reason),
+                onStart: cb.onStart,
+                onLipSyncFrame: cb.onLipSyncFrame,
+                onEnd: cb.onEnd,
+                onError: cb.onError,
+              });
             },
-            lastUpdatedAt: new Date().toISOString(),
-          }));
-          setActiveEvent(null);
-          setSpeakingState('idle');
-          setPlaybackStarted(false);
-          playbackStartedRef.current = false;
-          pushLivePlayback({
-            activeEvent: null,
-            speakingState: 'idle',
-            activeScholar: startedEvent.scholarId,
-            mouthLevel: 0,
-            playbackStarted: false,
+            stopAmeenSpeech: () => studioTTSRouter.stop(),
+            onLipSyncFrame: (frame) => {
+              emitLipSyncFrame(frame);
+              const now = performance.now();
+              if (!frame.active || now - lastBroadcastSyncRef.current > 85) {
+                lastBroadcastSyncRef.current = now;
+                pushLivePlayback({
+                  activeEvent: activeEventRef.current || startedEvent,
+                  speakingState: 'holding',
+                  activeScholar: startedEvent.scholarId,
+                  mouthLevel: frame.level,
+                  lipSyncFrame: frame,
+                  scholarAnimation: animationDirectorRef.current?.getSnapshots(),
+                  playbackStarted: false,
+                });
+              }
+            },
+            onPhaseTransition: () => {
+              pushLivePlayback({
+                activeEvent: activeEventRef.current || startedEvent,
+                speakingState: 'holding',
+                activeScholar: startedEvent.scholarId,
+                mouthLevel: 0,
+                lipSyncFrame: restingFrame,
+                scholarAnimation: animationDirectorRef.current?.getSnapshots(),
+                playbackStarted: false,
+              });
+            },
+            onComplete: () => {
+              duaClosingHandleRef.current = null;
+              if (holdTimeoutRef.current !== null) {
+                window.clearTimeout(holdTimeoutRef.current);
+              }
+              holdTimeoutRef.current = window.setTimeout(() => {
+                holdTimeoutRef.current = null;
+                finalizeCompletedQueueItem();
+              }, 300);
+            },
           });
-        }, holdMs);
+        } else {
+          animationDirectorRef.current?.setSpeechPhase(startedEvent.scholarId, 'IDLE');
+          const holdMs = Math.max(500, (stateRef.current.broadcast.postSpeechHoldSec || 2.5) * 1000);
+          holdTimeoutRef.current = window.setTimeout(() => {
+            holdTimeoutRef.current = null;
+            finalizeCompletedQueueItem();
+          }, holdMs);
+        }
       },
       onError: (reason) => {
         if (outcomeSettled) return;
@@ -1559,7 +1801,12 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         if (!handle || playbackHandleRef.current === handle) {
           playbackHandleRef.current = null;
         }
-        emitMouthLevel(0);
+        duaClosingHandleRef.current?.cancel();
+        duaClosingHandleRef.current = null;
+        animationDirectorRef.current?.safeUnwindToIdle(startedEvent.scholarId);
+
+        const restingFrame = createRestingLipSyncFrame(startedEvent.scholarId);
+        emitLipSyncFrame(restingFrame);
         playbackStartedRef.current = false;
         setPlaybackStarted(false);
         const phaseTaggedReason =
@@ -1594,6 +1841,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           speakingState: 'idle',
           activeScholar: startedEvent.scholarId,
           mouthLevel: 0,
+          lipSyncFrame: restingFrame,
+          scholarAnimation: animationDirectorRef.current?.getSnapshots(),
           playbackStarted: false,
         });
       },
@@ -1603,7 +1852,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
     } else if (playbackHandleRef.current === handle) {
       playbackHandleRef.current = null;
     }
-  }, [state.queue, state.queuePaused, activeEvent, isBroadcastView, hasUserGesture, emitMouthLevel, appendLog]);
+  }, [state.queue, state.queuePaused, activeEvent, isBroadcastView, hasUserGesture, emitLipSyncFrame, appendLog]);
 
   const toggleQueuePause = useCallback(() => {
     setState((prev) => {
@@ -1622,9 +1871,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       verifiedArabicAudioPlayer.pause();
       studioTTSRouter.pause();
     }
+    animationDirectorRef.current?.pause();
     setIsSpeechPaused(true);
-    emitMouthLevel(0);
-  }, [emitMouthLevel]);
+    const activeSch = activeEventRef.current?.scholarId || stateRef.current.scholars.currentSpeaker;
+    emitLipSyncFrame(createRestingLipSyncFrame(activeSch));
+  }, [emitLipSyncFrame]);
 
   const resumeSpeech = useCallback(() => {
     playbackHandleRef.current?.resume();
@@ -1632,6 +1883,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       verifiedArabicAudioPlayer.resume();
       studioTTSRouter.resume();
     }
+    animationDirectorRef.current?.resume();
     setIsSpeechPaused(false);
   }, []);
 
@@ -1640,11 +1892,18 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       window.clearTimeout(holdTimeoutRef.current);
       holdTimeoutRef.current = null;
     }
+    duaClosingHandleRef.current?.cancel();
+    duaClosingHandleRef.current = null;
+    activeTestClosingHandleRef.current?.cancel();
+    activeTestClosingHandleRef.current = null;
     playbackHandleRef.current?.cancel();
     playbackHandleRef.current = null;
     verifiedArabicAudioPlayer.stop();
     studioTTSRouter.stop();
-    emitMouthLevel(0);
+    const activeSch = activeEventRef.current?.scholarId || stateRef.current.scholars.currentSpeaker;
+    animationDirectorRef.current?.safeUnwindToIdle(activeSch);
+    const restingFrame = createRestingLipSyncFrame(activeSch);
+    emitLipSyncFrame(restingFrame);
     setIsSpeechPaused(false);
 
     const currentActive = activeEventRef.current;
@@ -1670,9 +1929,11 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       speakingState: 'idle',
       activeScholar: stateRef.current.scholars.currentSpeaker,
       mouthLevel: 0,
+      lipSyncFrame: restingFrame,
+      scholarAnimation: animationDirectorRef.current?.getSnapshots(),
       playbackStarted: false,
     });
-  }, [emitMouthLevel]);
+  }, [emitLipSyncFrame]);
 
   const removeQueueItem = useCallback(
     (id: string) => {
@@ -1775,6 +2036,10 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       if (activeEventRef.current || playbackHandleRef.current?.isLocked() || verifiedArabicAudioPlayer.isPlaying()) {
         return; // Don't clobber active queue or Arabic audio playback
       }
+      activeTestClosingHandleRef.current?.cancel();
+      activeTestClosingHandleRef.current = null;
+      studioTTSRouter.stop();
+
       const voiceCfg = stateRef.current.voice;
       const chosenVoiceURI = resolveScholarVoiceURI(voiceCfg, scholarId);
       const chosenNeuralVoiceId =
@@ -1787,7 +2052,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         pitch: voiceCfg.scholar1Pitch,
       });
 
-      const chosenScholar1Engine =
+      const chosenScholar1Engine: 'ema_lightning' | 'seslen_hasan' | 'zerre_ses_a' =
         voiceCfg.scholar1Engine === 'ema_lightning'
           ? 'ema_lightning'
           : voiceCfg.scholar1Engine === 'zerre_ses_a'
@@ -1802,13 +2067,21 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
             : voiceCfg.seslenHasanRate ?? 0.94
           : prosody.rate;
 
-      setLastSpeechError(null);
-      setState((prev) => ({
-        ...prev,
-        scholars: { ...prev.scholars, currentSpeaker: scholarId },
-      }));
-      setSpeakingState('speaking');
-      studioTTSRouter.speak(sampleText, {
+      const isSupplication = isSupplicationEvent(
+        {
+          tier: 'small_gift',
+          eventType: 'gift',
+          renderedPrayer: sampleText,
+          playbackPhase: 'turkish_speech',
+        },
+        sampleText
+      );
+      const plan = prepareDuaSpeechPlan(sampleText, {
+        isSupplication,
+        isYasinClosing: false,
+      });
+
+      const testTtsOptions = {
         scholarId,
         scholar1Engine: scholarId === 'scholar_1' ? chosenScholar1Engine : undefined,
         emaFallbackToHasan: voiceCfg.emaLightningFallbackToHasan,
@@ -1824,23 +2097,66 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         rate: effectiveRate,
         pitch: prosody.pitch,
         volume: voiceCfg.volume,
+      };
+
+      setLastSpeechError(null);
+      setState((prev) => ({
+        ...prev,
+        scholars: { ...prev.scholars, currentSpeaker: scholarId },
+      }));
+      setSpeakingState('speaking');
+      animationDirectorRef.current?.setSpeechPhase(scholarId, 'SPEAKING');
+
+      studioTTSRouter.speak(plan.bodyText || sampleText, {
+        ...testTtsOptions,
         onFallbackNotice: (reason) => {
           appendLog('warning', 'tts', reason);
         },
-        onMouthLevel: (lvl) => emitMouthLevel(lvl),
+        onLipSyncFrame: (frame) => {
+          animationDirectorRef.current?.syncFromLipSyncFrame(scholarId, frame, true);
+          emitLipSyncFrame(frame);
+        },
         onEnd: () => {
-          emitMouthLevel(0);
-          setSpeakingState('idle');
+          emitLipSyncFrame(createRestingLipSyncFrame(scholarId));
+          if (plan.hasDuaClosingGesture && animationDirectorRef.current) {
+            setSpeakingState('holding');
+            activeTestClosingHandleRef.current = animationDirectorRef.current.runDuaClosingSequence({
+              scholarId,
+              ameenText: plan.ameenText || 'Âmin.',
+              speakAmeen: (ameenText, cb) => {
+                studioTTSRouter.speak(ameenText, {
+                  ...testTtsOptions,
+                  rate: Math.max(0.76, (testTtsOptions.rate || 0.94) * 0.9),
+                  onFallbackNotice: (reason) => appendLog('warning', 'tts', reason),
+                  onStart: cb.onStart,
+                  onLipSyncFrame: cb.onLipSyncFrame,
+                  onEnd: cb.onEnd,
+                  onError: cb.onError,
+                });
+              },
+              stopAmeenSpeech: () => studioTTSRouter.stop(),
+              onLipSyncFrame: (frame) => emitLipSyncFrame(frame),
+              onComplete: () => {
+                activeTestClosingHandleRef.current = null;
+                animationDirectorRef.current?.setSpeechPhase(scholarId, 'IDLE');
+                setSpeakingState('idle');
+              },
+            });
+          } else {
+            animationDirectorRef.current?.setSpeechPhase(scholarId, 'IDLE');
+            setSpeakingState('idle');
+          }
         },
         onError: (msg) => {
-          emitMouthLevel(0);
+          emitLipSyncFrame(createRestingLipSyncFrame(scholarId));
+          animationDirectorRef.current?.safeUnwindToIdle(scholarId);
           setSpeakingState('idle');
           setLastSpeechError(msg);
           appendLog('warning', 'tts', msg);
         },
       });
     },
-    [appendLog, emitMouthLevel]
+    [appendLog, emitLipSyncFrame]
   );
 
   const testSystemTurkishSpeech = useCallback(
@@ -1849,6 +2165,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       if (activeEventRef.current || playbackHandleRef.current?.isLocked() || verifiedArabicAudioPlayer.isPlaying()) {
         return;
       }
+      activeTestClosingHandleRef.current?.cancel();
+      activeTestClosingHandleRef.current = null;
       const voiceCfg = stateRef.current.voice;
       const chosenVoiceURI = resolveScholarVoiceURI(voiceCfg, scholarId);
       const prosody = getScholarProsody(voiceCfg.rate, voiceCfg.pitch, scholarId, {
@@ -1864,6 +2182,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         scholars: { ...prev.scholars, currentSpeaker: scholarId },
       }));
       setSpeakingState('speaking');
+      animationDirectorRef.current?.setSpeechPhase(scholarId, 'SPEAKING');
 
       studioTTSRouter.speak('Esselâmü aleyküm. Allah dualarımızı kabul eylesin.', {
         scholarId,
@@ -1874,20 +2193,25 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         rate: prosody.rate,
         pitch: prosody.pitch,
         volume: voiceCfg.volume,
-        onMouthLevel: (lvl) => emitMouthLevel(lvl),
+        onLipSyncFrame: (frame) => {
+          animationDirectorRef.current?.syncFromLipSyncFrame(scholarId, frame, true);
+          emitLipSyncFrame(frame);
+        },
         onEnd: () => {
-          emitMouthLevel(0);
+          emitLipSyncFrame(createRestingLipSyncFrame(scholarId));
+          animationDirectorRef.current?.setSpeechPhase(scholarId, 'IDLE');
           setSpeakingState('idle');
         },
         onError: (msg) => {
-          emitMouthLevel(0);
+          emitLipSyncFrame(createRestingLipSyncFrame(scholarId));
+          animationDirectorRef.current?.safeUnwindToIdle(scholarId);
           setSpeakingState('idle');
           setLastSpeechError(msg);
           appendLog('warning', 'tts', msg);
         },
       });
     },
-    [appendLog, emitMouthLevel]
+    [appendLog, emitLipSyncFrame]
   );
 
   const testServerNeuralPlayback = useCallback(
@@ -1915,6 +2239,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       return new Promise<{ ok: boolean; message: string }>((resolve) => {
         let settled = false;
         serverNeuralTTSProvider.speak(sampleText, {
+          scholarId,
           neuralProviderId: voiceCfg.neuralProviderId,
           neuralVoiceId: chosenNeuralVoiceId,
           tone: voiceCfg.narrationTone,
@@ -1931,9 +2256,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
               });
             }
           },
-          onMouthLevel: (lvl) => emitMouthLevel(lvl),
+          onLipSyncFrame: (frame) => emitLipSyncFrame(frame),
           onEnd: () => {
-            emitMouthLevel(0);
+            emitLipSyncFrame(createRestingLipSyncFrame(scholarId));
             setSpeakingState('idle');
             if (!settled) {
               settled = true;
@@ -1941,7 +2266,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
             }
           },
           onError: (reason) => {
-            emitMouthLevel(0);
+            emitLipSyncFrame(createRestingLipSyncFrame(scholarId));
             setSpeakingState('idle');
             appendLog('warning', 'tts', `Server neural TTS test: ${reason}`);
             if (!settled) {
@@ -1952,7 +2277,7 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         });
       });
     },
-    [appendLog, emitMouthLevel]
+    [appendLog, emitLipSyncFrame]
   );
 
   const createConnectorCallbacks = useCallback(
@@ -2384,6 +2709,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       unlockAudioByGesture,
       refreshVoices,
       subscribeMouthLevel,
+      subscribeLipSyncFrame,
+      subscribeScholarAnimation,
       addPrayer,
       updatePrayer,
       deletePrayer,
@@ -2445,6 +2772,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
       unlockAudioByGesture,
       refreshVoices,
       subscribeMouthLevel,
+      subscribeLipSyncFrame,
+      subscribeScholarAnimation,
       addPrayer,
       updatePrayer,
       deletePrayer,

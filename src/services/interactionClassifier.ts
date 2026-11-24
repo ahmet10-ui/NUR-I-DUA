@@ -20,7 +20,7 @@ export interface GiftClassificationResult {
   tier: Exclude<InteractionTierId, 'follower'> | null;
   /**
    * Number of queue items generated for this single finalized gift event.
-   * For any single completed gift event >= yasinMinCoins (e.g. 300, 600, 1000),
+   * For any single completed gift event >= yasinMinCoins (e.g. 200, 600, 1000+),
    * this is strictly 1.
    */
   eventCount: 0 | 1;
@@ -152,7 +152,7 @@ export function calculateGiftCoins(
  * - Never classifies an incomplete streak (`giftType === 1 && repeatEnd !== true`).
  * - Never accumulates separate gift events across time.
  * - Produces strictly 1 Yâsîn event per completed gift event reaching `>= yasinMinCoins`
- *   (including 300, 600, 1000+ coin single events).
+ *   (default 200+, including 200, 600, 1000+ coin single events).
  * - Never triggers Yâsîn on missing, zero, negative, or non-finite coin values.
  */
 export function classifyGiftInteraction(

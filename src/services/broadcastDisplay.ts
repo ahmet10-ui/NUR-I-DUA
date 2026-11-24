@@ -15,10 +15,7 @@ export function buildTopTierBarItems(
   tierRules?: Partial<TierRuleConfig> | null
 ): TopTierBarItem[] {
   const rules = resolveTierRules(tierRules);
-  const highRangeLabel =
-    rules.highGiftMinCoins === 36 && rules.highGiftMaxCoins === 199
-      ? '36–60 · 61–199'
-      : `${rules.highGiftMinCoins}–${rules.highGiftMaxCoins}`;
+  const highRangeLabel = `${rules.highGiftMinCoins}–${rules.highGiftMaxCoins}`;
 
   return [
     {
@@ -27,7 +24,7 @@ export function buildTopTierBarItems(
       unitLabel: 'JETON',
       label: 'Selamlama',
       weight: 0.85,
-      nowrapRange: false,
+      nowrapRange: true,
     },
     {
       tier: 'mid_gift',
@@ -35,23 +32,23 @@ export function buildTopTierBarItems(
       unitLabel: 'JETON',
       label: 'Açılış duası',
       weight: 1.0,
-      nowrapRange: false,
+      nowrapRange: true,
     },
     {
       tier: 'high_gift',
       range: highRangeLabel,
       unitLabel: 'JETON',
       label: 'Kapsamlı dua',
-      weight: 1.5,
+      weight: 1.15,
       nowrapRange: true,
     },
     {
       tier: 'yasin_300',
       range: `${rules.yasinMinCoins}+`,
       unitLabel: 'JETON',
-      label: 'Yâsîn',
-      weight: 0.85,
-      nowrapRange: false,
+      label: 'Yâsîn-i Şerîf',
+      weight: 1.05,
+      nowrapRange: true,
     },
   ];
 }

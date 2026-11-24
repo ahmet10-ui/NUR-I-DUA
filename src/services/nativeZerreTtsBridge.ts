@@ -160,7 +160,7 @@ interface ZerreTtsPluginContract {
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'zerreMouth',
-    listenerFunc: (event: { level: number; utteranceId?: string }) => void
+    listenerFunc: (event: { level: number; positionMs?: number; hfRatio?: number; utteranceId?: string }) => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'zerreLog',
@@ -368,7 +368,7 @@ export async function subscribeZerreEvents(handlers: {
   onDownloadProgress?: (ev: ZerreDownloadProgressEvent) => void;
   onDownloadError?: (ev: { message: string }) => void;
   onStart?: (ev: { token: number; utteranceId?: string; timeToFirstAudioMs?: number }) => void;
-  onMouth?: (ev: { level: number; utteranceId?: string }) => void;
+  onMouth?: (ev: { level: number; positionMs?: number; hfRatio?: number; utteranceId?: string }) => void;
   onLog?: (ev: { line: string }) => void;
   onDone?: (ev: ZerreSpeakTestResult & { token: number; utteranceId?: string; totalWallMs?: number }) => void;
   onError?: (ev: { token: number; utteranceId?: string; message: string }) => void;

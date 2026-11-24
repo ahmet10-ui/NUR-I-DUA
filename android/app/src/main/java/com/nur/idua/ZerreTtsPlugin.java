@@ -1044,15 +1044,32 @@ public class ZerreTtsPlugin extends Plugin {
 
             int len = Math.min(frameSize, pcm.length - off);
             double sumSq = 0.0;
+            double diffSq = 0.0;
+            double prevV = 0.0;
             for (int i = 0; i < len; i++) {
                 double n = pcm[off + i] / 32768.0;
                 sumSq += n * n;
+                if (i > 0) {
+                    double d = n - prevV;
+                    diffSq += d * d;
+                }
+                prevV = n;
             }
             double rms = Math.sqrt(sumSq / Math.max(1, len));
             double level = Math.min(1.0, rms * 3.8);
+            double hfRatio = sumSq > 1e-7
+                ? Math.max(0.0, Math.min(1.0, Math.sqrt(diffSq / Math.max(1e-9, sumSq)) * 0.55))
+                : 0.0;
+            long posMs = 0L;
+            try {
+                posMs = Math.max(0L, Math.round((track.getPlaybackHeadPosition() * 1000.0) / SAMPLE_RATE));
+            } catch (Throwable ignored) {
+            }
 
             JSObject mouth = new JSObject();
             mouth.put("level", level);
+            mouth.put("positionMs", posMs);
+            mouth.put("hfRatio", Math.round(hfRatio * 1000.0) / 1000.0);
             mouth.put("utteranceId", utteranceId);
             notifyListeners("zerreMouth", mouth);
 

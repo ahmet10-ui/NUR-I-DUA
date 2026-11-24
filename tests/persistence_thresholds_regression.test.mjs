@@ -207,10 +207,16 @@ test('Boundary matrix (1, 10, 11, 35, 36, 60, 61, 199, 200) maps accurately whil
 
 test('Broadcast header preserves 4-box layout with JETON labels, dynamic tier rules, and zero notification regressions', () => {
   assert.equal(TOP_TIER_BAR_ITEMS.length, 4);
-  assert.equal(TOP_TIER_BAR_GRID_COLUMNS, '0.85fr 1fr 1.5fr 0.85fr');
-  for (const item of TOP_TIER_BAR_ITEMS) {
-    assert.equal(item.unitLabel, 'JETON');
-  }
+  assert.equal(TOP_TIER_BAR_GRID_COLUMNS, '0.85fr 1fr 1.15fr 1.05fr');
+  assert.deepEqual(
+    TOP_TIER_BAR_ITEMS.map((i) => ({ range: i.range, unitLabel: i.unitLabel, label: i.label })),
+    [
+      { range: '1–10', unitLabel: 'JETON', label: 'Selamlama' },
+      { range: '11–35', unitLabel: 'JETON', label: 'Açılış duası' },
+      { range: '36–199', unitLabel: 'JETON', label: 'Kapsamlı dua' },
+      { range: '200+', unitLabel: 'JETON', label: 'Yâsîn-i Şerîf' },
+    ]
+  );
 
   const customItems = buildTopTierBarItems({
     ...DEFAULT_TIER_RULES,
@@ -415,3 +421,29 @@ test('App.tsx keeps a single StudioProvider across authenticated views & StudioC
   assert.equal(customPreserved.highGiftMinCoins, 70);
   assert.equal(customPreserved.yasinMinCoins, 250);
 });
+
+test('Centralized thresholds (1, 10, 11, 35, 36, 199, 200) leave zero 36–60 · 61–199 splits and normalize synced tierRules', () => {
+  const broadcastDisplaySrc = fs.readFileSync(path.resolve('src/services/broadcastDisplay.ts'), 'utf8');
+  const ctxSrc = fs.readFileSync(path.resolve('src/context/StudioContext.tsx'), 'utf8');
+
+  assert.equal(broadcastDisplaySrc.includes('36–60'), false);
+  assert.equal(broadcastDisplaySrc.includes('61–199'), false);
+  assert.ok(ctxSrc.includes('resolveTierRules(migrateLegacyTierRules(res.appState?.tierRules))'));
+  assert.ok(ctxSrc.includes('resolveTierRules(migrateLegacyTierRules(incoming?.tierRules))'));
+
+  const boundaryChecks = [
+    [1, 'small_gift'],
+    [10, 'small_gift'],
+    [11, 'mid_gift'],
+    [35, 'mid_gift'],
+    [36, 'high_gift'],
+    [199, 'high_gift'],
+    [200, 'yasin_300'],
+  ];
+  for (const [coins, expectedTier] of boundaryChecks) {
+    const result = classifyGiftInteraction({ username: 'deneme_user', unitCoins: coins, repeatCount: 1 });
+    assert.equal(result.shouldEnqueue, true);
+    assert.equal(result.tier, expectedTier, `coins=${coins} must map to ${expectedTier}`);
+  }
+});
+

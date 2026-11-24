@@ -1,4 +1,10 @@
-import { AppState, QueueEvent, ScholarId } from '../types/nuridua';
+import {
+  AppState,
+  LipSyncFrame,
+  QueueEvent,
+  ScholarAnimationSnapshot,
+  ScholarId,
+} from '../types/nuridua';
 
 const STORAGE_KEY = 'nur_i_dua_studio_state_v1';
 const BROADCAST_CHANNEL_NAME = 'nur_i_dua_sync_channel';
@@ -8,6 +14,8 @@ export interface LivePlaybackPayload {
   speakingState: 'idle' | 'speaking' | 'holding';
   activeScholar: ScholarId;
   mouthLevel: number;
+  lipSyncFrame?: LipSyncFrame;
+  scholarAnimation?: Partial<Record<ScholarId, ScholarAnimationSnapshot>>;
   playbackStarted?: boolean;
 }
 

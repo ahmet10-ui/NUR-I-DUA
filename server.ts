@@ -20,6 +20,8 @@ interface BroadcastSnapshot {
     speakingState: 'idle' | 'speaking' | 'holding';
     activeScholar: 'scholar_1' | 'scholar_2';
     mouthLevel: number;
+    lipSyncFrame?: unknown;
+    scholarAnimation?: unknown;
     playbackStarted: boolean;
     updatedAt: string;
   };
@@ -120,6 +122,8 @@ async function startServer() {
       speakingState: body.speakingState ?? 'idle',
       activeScholar: body.activeScholar ?? 'scholar_1',
       mouthLevel: typeof body.mouthLevel === 'number' ? body.mouthLevel : 0,
+      lipSyncFrame: body.lipSyncFrame ?? undefined,
+      scholarAnimation: body.scholarAnimation ?? undefined,
       playbackStarted: Boolean(body.playbackStarted),
       updatedAt: new Date().toISOString(),
     };

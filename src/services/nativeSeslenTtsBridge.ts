@@ -169,7 +169,7 @@ interface SeslenLocalTtsPluginContract {
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenMouth',
-    listenerFunc: (event: { level: number; utteranceId?: string }) => void
+    listenerFunc: (event: { level: number; positionMs?: number; hfRatio?: number; utteranceId?: string }) => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'seslenLog',
@@ -390,7 +390,7 @@ export async function subscribeSeslenEvents(handlers: {
   onDownloadProgress?: (ev: SeslenDownloadProgressEvent) => void;
   onDownloadError?: (ev: { message: string }) => void;
   onStart?: (ev: { token: number; utteranceId?: string; timeToFirstAudioMs?: number }) => void;
-  onMouth?: (ev: { level: number; utteranceId?: string }) => void;
+  onMouth?: (ev: { level: number; positionMs?: number; hfRatio?: number; utteranceId?: string }) => void;
   onLog?: (ev: { line: string }) => void;
   onDone?: (ev: SeslenSpeakTestResult & { token: number; utteranceId?: string; totalWallMs?: number }) => void;
   onError?: (ev: { token: number; utteranceId?: string; message: string }) => void;

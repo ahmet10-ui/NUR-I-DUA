@@ -1,6 +1,7 @@
 import {
   GiftRule,
   HighTierDuaEntry,
+  LipSyncFrame,
   PrayerCategoryId,
   PrayerTemplate,
   QueueEvent,
@@ -10,6 +11,7 @@ import {
 } from '../types/nuridua';
 import { renderPersonalizedPrayer, sanitizeUsername } from '../utils/sanitize';
 import { containsArabicScript, sanitizeTurkishTtsPayload, stripArabicScriptForTurkishTts } from './ttsService';
+import { createRestingLipSyncFrame } from './turkishLipSync';
 
 export const YASIN_ACCEPTED_AUDIO_FORMATS = ['.mp3', '.m4a', '.ogg', '.wav'] as const;
 
@@ -192,11 +194,12 @@ export interface Stage2PlaybackParams {
   event: QueueEvent;
   arabicPlayer: ArabicClipAdapter;
   turkishTts: TurkishTtsAdapter;
-  ttsOptions: Omit<TTSSpeakOptions, 'onStart' | 'onMouthLevel' | 'onEnd' | 'onError'>;
+  ttsOptions: Omit<TTSSpeakOptions, 'onStart' | 'onMouthLevel' | 'onLipSyncFrame' | 'onEnd' | 'onError'>;
   arabicStartTimeoutMs?: number;
   onPhaseChange?: (phase: 'yasin_intro' | 'arabic_audio' | 'turkish_speech') => void;
   onStart?: () => void;
   onMouthLevel?: (level: number) => void;
+  onLipSyncFrame?: (frame: LipSyncFrame) => void;
   onFallbackNotice?: (reason: string) => void;
   onComplete: () => void;
   onError: (reason: string) => void;
@@ -225,6 +228,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
     onPhaseChange,
     onStart,
     onMouthLevel,
+    onLipSyncFrame,
     onFallbackNotice,
     onComplete,
     onError,
@@ -258,13 +262,18 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
     }
   };
 
+  const emitRestingMouth = (scholarId: ScholarId = (ttsOptions.scholarId || event.scholarId) as ScholarId) => {
+    onLipSyncFrame?.(createRestingLipSyncFrame(scholarId));
+    onMouthLevel?.(0);
+  };
+
   const finishSuccess = () => {
     if (cancelled || completed) return;
     clearArabicWatchdog();
     completed = true;
     locked = false;
     phase = 'done';
-    onMouthLevel?.(0);
+    emitRestingMouth();
     onComplete();
   };
 
@@ -274,7 +283,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
     completed = true;
     locked = false;
     phase = 'done';
-    onMouthLevel?.(0);
+    emitRestingMouth();
     onError(reason);
   };
 
@@ -311,8 +320,15 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
       onStart: () => {
         notifyStartOnce();
       },
+      onLipSyncFrame: (frame) => {
+        if (!cancelled && !completed && phase === 'turkish_speech') {
+          onLipSyncFrame?.(frame);
+        }
+      },
       onMouthLevel: (lvl) => {
-        if (!cancelled && !completed) onMouthLevel?.(lvl);
+        if (!cancelled && !completed && phase === 'turkish_speech') {
+          onMouthLevel?.(lvl);
+        }
       },
       onFallbackNotice: (reason) => {
         if (!cancelled && !completed) onFallbackNotice?.(reason);
@@ -362,6 +378,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
       phase = 'arabic_audio';
       arabicStarted = false;
       arabicSettled = false;
+      emitRestingMouth('scholar_1');
       onPhaseChange?.('arabic_audio');
 
       if (arabicStartTimeoutMs > 0) {
@@ -387,10 +404,11 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
           if (cancelled || completed || arabicSettled) return;
           arabicStarted = true;
           clearArabicWatchdog();
+          emitRestingMouth('scholar_1');
           notifyStartOnce();
         },
-        onMouthLevel: (lvl) => {
-          if (!cancelled && !completed) onMouthLevel?.(lvl);
+        onMouthLevel: () => {
+          // Strict guard: never animate scholar mouths during Arabic Qari MP3 recitation
         },
         onEnd: () => {
           if (cancelled || completed || arabicSettled) return;
@@ -408,7 +426,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
             return;
           }
           arabicSettled = true;
-          onMouthLevel?.(0);
+          emitRestingMouth('scholar_1');
           // Phase 3: Hacı Ahmet Efendi long closing thank-you & ithaf prayer
           startTurkishPhase('scholar_1');
         },
@@ -434,8 +452,15 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
         onStart: () => {
           notifyStartOnce();
         },
+        onLipSyncFrame: (frame) => {
+          if (!cancelled && !completed && phase === 'yasin_intro') {
+            onLipSyncFrame?.(frame);
+          }
+        },
         onMouthLevel: (lvl) => {
-          if (!cancelled && !completed) onMouthLevel?.(lvl);
+          if (!cancelled && !completed && phase === 'yasin_intro') {
+            onMouthLevel?.(lvl);
+          }
         },
         onFallbackNotice: (reason) => {
           if (!cancelled && !completed) onFallbackNotice?.(reason);
@@ -443,7 +468,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
         onEnd: () => {
           if (cancelled || completed || introSettled) return;
           introSettled = true;
-          onMouthLevel?.(0);
+          emitRestingMouth('scholar_1');
           startYasinAudioPhase();
         },
         onError: (reason) => {
@@ -466,6 +491,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
         phase = 'arabic_audio';
         arabicStarted = false;
         arabicSettled = false;
+        emitRestingMouth();
         onPhaseChange?.('arabic_audio');
         arabicPlayer.play(event.arabicAudioUrl.trim(), {
           volume: ttsOptions.volume,
@@ -473,15 +499,16 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
           onStart: () => {
             if (cancelled || completed || arabicSettled) return;
             arabicStarted = true;
+            emitRestingMouth();
             notifyStartOnce();
           },
-          onMouthLevel: (lvl) => {
-            if (!cancelled && !completed) onMouthLevel?.(lvl);
+          onMouthLevel: () => {
+            // Strict guard: never animate scholar mouths during Arabic Qari MP3 recitation
           },
           onEnd: () => {
             if (cancelled || completed || arabicSettled) return;
             arabicSettled = true;
-            onMouthLevel?.(0);
+            emitRestingMouth();
             startTurkishPhase();
           },
           onError: (reason) => {
@@ -490,7 +517,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
             onFallbackNotice?.(
               `Doğrulanmış Arapça ses dosyası çalınamadı (${reason}); yalnızca Türkçe dua okunuyor.`
             );
-            onMouthLevel?.(0);
+            emitRestingMouth();
             startTurkishPhase();
           },
         });
@@ -530,7 +557,7 @@ export function executeStage2PlaybackSequence(params: Stage2PlaybackParams): Sta
       clearArabicWatchdog();
       arabicPlayer.stop();
       turkishTts.stop();
-      onMouthLevel?.(0);
+      emitRestingMouth();
     },
     isLocked() {
       return locked && !cancelled && !completed;

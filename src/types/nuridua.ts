@@ -378,6 +378,71 @@ export interface IScholarCharacterRig {
   dispose(): void;
 }
 
+export type LipSyncVisemeId =
+  | 'rest'
+  | 'closed_mbp'
+  | 'labiodental_fv'
+  | 'round_o'
+  | 'round_u'
+  | 'open_a'
+  | 'open_e'
+  | 'spread_i'
+  | 'neutral_c';
+
+export type LipSyncSyncMode =
+  | 'engine_boundary_viseme'
+  | 'pcm_envelope_viseme'
+  | 'spectral_audio_viseme'
+  | 'resting';
+
+export type ScholarAnimationPhase =
+  | 'IDLE'
+  | 'SPEAKING'
+  | 'SPEECH_PAUSE'
+  | 'RAISING_HANDS'
+  | 'AMEEN'
+  | 'WIPING_FACE'
+  | 'RETURNING_TO_IDLE';
+
+export interface ScholarAnimationSnapshot {
+  scholarId: ScholarId;
+  phase: ScholarAnimationPhase;
+  /** 0 = hands resting on thighs, 1 = hands lifted into gesture space */
+  handLiftProgress: number;
+  /** 0 = palms down (lap), 1 = palms up (🤲🏻), -1 = palms facing self (face wipe) */
+  palmOrientation: number;
+  /** 0 = chest height, 0 -> 1 = forehead -> cheeks -> chin wipe sweep */
+  wipeProgress: number;
+  /** 0 = relaxed on lap, ~0.38 = cupped 🤲🏻, ~0.22 = soft wipe */
+  fingerCurl: number;
+  /** Reverent calm eye softness (0..1) during AMEEN / WIPING_FACE */
+  calmEyeSoftness: number;
+  /** Gentle reverent head tilt/nod offset (-1..1) */
+  gestureHeadNod: number;
+  /** Strict guard: true ONLY when this scholar's mouth may articulate Turkish phonemes */
+  mouthAllowed: boolean;
+  /** Phase duration in ms for smooth cross-tab / OBS interpolation */
+  phaseDurationMs: number;
+  /** Wall timestamp when current phase started */
+  phaseStartedAtMs: number;
+  /** Updated timestamp */
+  updatedAtMs: number;
+}
+
+export interface LipSyncFrame {
+  level: number;
+  viseme: LipSyncVisemeId;
+  jawOpen: number;
+  lipRound: number;
+  lipClose: number;
+  lipSpread: number;
+  lowerLipTuck: number;
+  active: boolean;
+  isPause?: boolean;
+  scholarId?: ScholarId;
+  syncMode?: LipSyncSyncMode;
+}
+
 export interface TTSSpeakOptions {
   scholarId?: ScholarId;
   scholar1Engine?: 'seslen_hasan' | 'ema_lightning' | 'zerre_ses_a';
@@ -398,6 +463,7 @@ export interface TTSSpeakOptions {
   volume: number;
   onStart?: () => void;
   onMouthLevel?: (level: number) => void;
+  onLipSyncFrame?: (frame: LipSyncFrame) => void;
   onFallbackNotice?: (reason: string) => void;
   onEnd?: () => void;
   onError?: (reason: string) => void;

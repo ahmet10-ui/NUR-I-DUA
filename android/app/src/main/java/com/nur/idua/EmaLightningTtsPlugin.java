@@ -1186,7 +1186,7 @@ public class EmaLightningTtsPlugin extends Plugin {
 
     private void writePcmChunkWithPauseSupport(AudioTrack track, short[] pcm, long token, String utteranceId) {
         int offset = 0;
-        int blockShorts = 4800; // 100 ms blocks at 48 kHz
+        int blockShorts = 2400; // 50 ms blocks at 48 kHz
         while (offset < pcm.length && activePlaybackToken.get() == token) {
             if (isPlaybackPaused.get()) {
                 synchronized (audioLock) {
@@ -1218,12 +1218,27 @@ public class EmaLightningTtsPlugin extends Plugin {
 
             int count = Math.min(blockShorts, pcm.length - offset);
             double sumSq = 0.0;
+            double diffSq = 0.0;
+            double prevV = 0.0;
             for (int i = 0; i < count; i++) {
                 double v = pcm[offset + i] / 32768.0;
                 sumSq += v * v;
+                if (i > 0) {
+                    double d = v - prevV;
+                    diffSq += d * d;
+                }
+                prevV = v;
             }
             double rms = Math.sqrt(sumSq / Math.max(1, count));
-            emitMouthLevel(Math.max(0.0, Math.min(1.0, (rms - 0.012) * 4.8)), utteranceId);
+            double hfRatio = sumSq > 1e-7
+                ? Math.max(0.0, Math.min(1.0, Math.sqrt(diffSq / Math.max(1e-9, sumSq)) * 0.65))
+                : 0.0;
+            long posMs = 0L;
+            try {
+                posMs = Math.max(0L, Math.round((track.getPlaybackHeadPosition() * 1000.0) / SAMPLE_RATE));
+            } catch (Throwable ignored) {
+            }
+            emitMouthMetrics(Math.max(0.0, Math.min(1.0, (rms - 0.012) * 4.8)), posMs, hfRatio, utteranceId);
             int written = track.write(pcm, offset, count);
             if (written < 0) {
                 throw new RuntimeException("EMA AudioTrack write hatası (code=" + written + ").");
@@ -1233,8 +1248,18 @@ public class EmaLightningTtsPlugin extends Plugin {
     }
 
     private void emitMouthLevel(double level, String utteranceId) {
+        emitMouthMetrics(level, -1L, -1.0, utteranceId);
+    }
+
+    private void emitMouthMetrics(double level, long positionMs, double hfRatio, String utteranceId) {
         JSObject payload = new JSObject();
         payload.put("level", level);
+        if (positionMs >= 0L) {
+            payload.put("positionMs", positionMs);
+        }
+        if (hfRatio >= 0.0) {
+            payload.put("hfRatio", Math.round(hfRatio * 1000.0) / 1000.0);
+        }
         if (utteranceId != null) {
             payload.put("utteranceId", utteranceId);
         }

@@ -1705,7 +1705,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
             addLog("AudioTrack STREAM (" + labelForStream(logLabel) + "): 24000Hz, mono, PCM_16BIT, bufBytes=" + bufBytes);
             track.play();
 
-            final int sliceShorts = 2400; // 100 ms blocks -> crisp mouth animation without flooding bridge
+            final int sliceShorts = 1200; // 50 ms blocks at 24 kHz -> crisp mouth sync without flooding bridge
             while (activePlaybackToken.get() == token) {
                 StreamBlock block = queue.poll(50, TimeUnit.MILLISECONDS);
                 if (block == null) {
@@ -1742,12 +1742,27 @@ public class SeslenLocalTtsPlugin extends Plugin {
 
                     int count = Math.min(sliceShorts, pcm.length - offset);
                     double sumSq = 0.0;
+                    double diffSq = 0.0;
+                    double prevV = 0.0;
                     for (int i = 0; i < count; i++) {
                         double v = pcm[offset + i] / 32768.0;
                         sumSq += v * v;
+                        if (i > 0) {
+                            double d = v - prevV;
+                            diffSq += d * d;
+                        }
+                        prevV = v;
                     }
                     double rms = Math.sqrt(sumSq / Math.max(1, count));
-                    emitMouthLevel(Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8)), utteranceId);
+                    double hfRatio = sumSq > 1e-7
+                        ? Math.max(0.0, Math.min(1.0, Math.sqrt(diffSq / Math.max(1e-9, sumSq)) * 0.55))
+                        : 0.0;
+                    long posMs = 0L;
+                    try {
+                        posMs = Math.max(0L, Math.round((track.getPlaybackHeadPosition() * 1000.0) / SAMPLE_RATE));
+                    } catch (Throwable ignored) {
+                    }
+                    emitMouthMetrics(Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8)), posMs, hfRatio, utteranceId);
                     int written = track.write(pcm, offset, count);
                     if (written < 0) {
                         throw new RuntimeException("Seslen AudioTrack write hatası (code=" + written + ").");
@@ -1774,7 +1789,17 @@ public class SeslenLocalTtsPlugin extends Plugin {
     }
 
     private void emitMouthLevel(double level, String utteranceId) {
+        emitMouthMetrics(level, -1L, -1.0, utteranceId);
+    }
+
+    private void emitMouthMetrics(double level, long positionMs, double hfRatio, String utteranceId) {
         JSObject ev = new JSObject().put("level", level);
+        if (positionMs >= 0L) {
+            ev.put("positionMs", positionMs);
+        }
+        if (hfRatio >= 0.0) {
+            ev.put("hfRatio", Math.round(hfRatio * 1000.0) / 1000.0);
+        }
         if (utteranceId != null) {
             ev.put("utteranceId", utteranceId);
         }
@@ -2215,14 +2240,25 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 int windowStart = Math.max(0, Math.min(head, totalFrames - 1));
                 int windowEnd = Math.min(totalFrames, windowStart + 960);
                 double sumSq = 0.0;
+                double diffSq = 0.0;
+                double prevV = 0.0;
                 int cnt = Math.max(1, windowEnd - windowStart);
                 for (int i = windowStart; i < windowEnd; i++) {
                     double v = pcm16[i] / 32768.0;
                     sumSq += v * v;
+                    if (i > windowStart) {
+                        double d = v - prevV;
+                        diffSq += d * d;
+                    }
+                    prevV = v;
                 }
                 double rms = Math.sqrt(sumSq / cnt);
+                double hfRatio = sumSq > 1e-7
+                    ? Math.max(0.0, Math.min(1.0, Math.sqrt(diffSq / Math.max(1e-9, sumSq)) * 0.55))
+                    : 0.0;
+                long posMs = Math.max(0L, Math.round((head * 1000.0) / SAMPLE_RATE));
                 double mouthLevel = Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8));
-                emitMouthLevel(mouthLevel, utteranceId);
+                emitMouthMetrics(mouthLevel, posMs, hfRatio, utteranceId);
                 try {
                     Thread.sleep(45);
                 } catch (InterruptedException ie) {
@@ -2258,7 +2294,7 @@ public class SeslenLocalTtsPlugin extends Plugin {
             track.play();
 
             int offset = 0;
-            int chunkShorts = 2400; // 100 ms blocks -> zero bridge flooding
+            int chunkShorts = 1200; // 50 ms blocks -> crisp mouth sync without flooding bridge
             while (offset < pcm16.length && activePlaybackToken.get() == token) {
                 if (isPlaybackPaused.get()) {
                     synchronized (audioLock) {
@@ -2289,12 +2325,27 @@ public class SeslenLocalTtsPlugin extends Plugin {
                 }
                 int count = Math.min(chunkShorts, pcm16.length - offset);
                 double sumSq = 0.0;
+                double diffSq = 0.0;
+                double prevV = 0.0;
                 for (int i = 0; i < count; i++) {
                     double v = pcm16[offset + i] / 32768.0;
                     sumSq += v * v;
+                    if (i > 0) {
+                        double d = v - prevV;
+                        diffSq += d * d;
+                    }
+                    prevV = v;
                 }
                 double rms = Math.sqrt(sumSq / Math.max(1, count));
-                emitMouthLevel(Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8)), utteranceId);
+                double hfRatio = sumSq > 1e-7
+                    ? Math.max(0.0, Math.min(1.0, Math.sqrt(diffSq / Math.max(1e-9, sumSq)) * 0.55))
+                    : 0.0;
+                long posMs = 0L;
+                try {
+                    posMs = Math.max(0L, Math.round((track.getPlaybackHeadPosition() * 1000.0) / SAMPLE_RATE));
+                } catch (Throwable ignored) {
+                }
+                emitMouthMetrics(Math.max(0.0, Math.min(1.0, (rms - 0.015) * 4.8)), posMs, hfRatio, utteranceId);
                 int written = track.write(pcm16, offset, count);
                 if (written < 0) {
                     throw new RuntimeException("Seslen MODE_STREAM AudioTrack write hatası (code=" + written + ").");

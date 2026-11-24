@@ -48,6 +48,7 @@ import {
   subscribeZerreEvents,
 } from './nativeZerreTtsBridge';
 import { normalizeTurkishForZerre } from './zerreTextFrontend';
+import { TurkishLipSyncController, createRestingLipSyncFrame } from './turkishLipSync';
 
 export interface AvailableVoice {
   voiceURI: string;
@@ -421,9 +422,9 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
   private startDelayTimer: number | null = null;
   private safetyTimeout: number | null = null;
   private activeUtterance: SpeechSynthesisUtterance | null = null;
+  private activeController: TurkishLipSyncController | null = null;
   private isPaused = false;
   private isSpeakingInternal = false;
-  private pulseBoost = 0;
   private playbackToken = 0;
 
   isSupported(): boolean {
@@ -481,16 +482,22 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
 
     let finished = false;
     let startedNotified = false;
-    const startTime = performance.now();
+
+    const emitRest = () => {
+      options.onLipSyncFrame?.(createRestingLipSyncFrame(options.scholarId));
+      options.onMouthLevel?.(0);
+    };
 
     const finish = (isErr = false, msg?: string) => {
       if (finished || this.playbackToken !== token) return;
       finished = true;
       this.isSpeakingInternal = false;
       this.activeUtterance = null;
+      this.activeController?.stop();
+      this.activeController = null;
       this.clearTimers();
       this.isPaused = false;
-      options.onMouthLevel?.(0);
+      emitRest();
       if (isErr) {
         options.onError?.(msg || 'Sistem TTS konuşması kesintiye uğradı.');
       } else {
@@ -498,7 +505,7 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
       }
     };
 
-    const ensureEstimatedLipSync = () => {
+    const ensureVisemeLipSyncLoop = () => {
       if (!startedNotified) {
         startedNotified = true;
         options.onStart?.();
@@ -506,19 +513,14 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
       if (this.activeTimer === null) {
         this.activeTimer = window.setInterval(() => {
           if (this.playbackToken !== token || finished) return;
-          if (this.isPaused || !this.isSpeakingInternal) {
-            options.onMouthLevel?.(0);
+          if (this.isPaused || !this.isSpeakingInternal || !this.activeController) {
+            emitRest();
             return;
           }
-          const t = (performance.now() - startTime) / 1000;
-          this.pulseBoost = Math.max(0, this.pulseBoost * 0.78);
-          const syllableWave =
-            0.22 +
-            0.4 * Math.abs(Math.sin(t * 7.6 * options.rate)) +
-            0.14 * Math.sin(t * 13.5);
-          const level = Math.max(0.05, Math.min(1, syllableWave + this.pulseBoost * 0.32));
-          options.onMouthLevel?.(level);
-        }, 45);
+          const frame = this.activeController.sampleFrame();
+          options.onLipSyncFrame?.(frame);
+          options.onMouthLevel?.(frame.level);
+        }, 33);
       }
     };
 
@@ -552,14 +554,23 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
         return;
       }
 
-      armSegmentTimeout(segments[index]);
-      const utterance = new SpeechSynthesisUtterance(segments[index]);
+      const segmentText = segments[index];
+      armSegmentTimeout(segmentText);
+      const utterance = new SpeechSynthesisUtterance(segmentText);
       // Keep reference on instance so Chrome/Android GC cannot drop the utterance and lose `onend`
       this.activeUtterance = utterance;
       utterance.lang = options.lang || 'tr-TR';
       utterance.rate = Math.min(1.4, Math.max(0.5, options.rate));
       utterance.pitch = Math.min(1.4, Math.max(0.5, options.pitch));
       utterance.volume = Math.min(1, Math.max(0, options.volume));
+
+      const segController = new TurkishLipSyncController({
+        text: segmentText,
+        rate: utterance.rate,
+        scholarId: options.scholarId,
+        syncMode: 'engine_boundary_viseme',
+      });
+      this.activeController = segController;
 
       if (resolved.voice) {
         utterance.voice = resolved.voice;
@@ -568,15 +579,20 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
       utterance.onstart = () => {
         if (finished || this.playbackToken !== token) return;
         this.isSpeakingInternal = true;
-        ensureEstimatedLipSync();
+        segController.start();
+        ensureVisemeLipSyncLoop();
       };
 
-      utterance.onboundary = () => {
-        this.pulseBoost = 0.8;
+      utterance.onboundary = (ev) => {
+        if (finished || this.playbackToken !== token || this.isPaused) return;
+        const charLen = (ev as SpeechSynthesisEvent & { charLength?: number }).charLength;
+        segController.handleBoundary(ev.charIndex, charLen);
       };
 
       utterance.onend = () => {
         if (finished || this.playbackToken !== token) return;
+        segController.stop();
+        emitRest();
         if (index + 1 < segments.length) {
           // Chain synchronously inside onend so Android WebView preserves active session
           speakSegmentAt(index + 1);
@@ -629,6 +645,7 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
 
   pause(): void {
     this.isPaused = true;
+    this.activeController?.pause();
     if (this.isSupported()) {
       try {
         window.speechSynthesis.pause();
@@ -640,6 +657,7 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
 
   resume(): void {
     this.isPaused = false;
+    this.activeController?.resume();
     if (this.isSupported()) {
       try {
         window.speechSynthesis.resume();
@@ -657,6 +675,8 @@ export class BrowserSpeechSynthesisProvider implements ITTSProvider {
         (window.speechSynthesis.speaking || window.speechSynthesis.pending));
     this.isSpeakingInternal = false;
     this.activeUtterance = null;
+    this.activeController?.stop();
+    this.activeController = null;
     this.clearTimers();
     this.isPaused = false;
     if (shouldCancel && this.isSupported()) {
@@ -695,6 +715,7 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
   private analyser: AnalyserNode | null = null;
   private rafId: number | null = null;
   private fallbackEnvelopeTimer: number | null = null;
+  private activeController: TurkishLipSyncController | null = null;
   private isPaused = false;
   private playbackToken = 0;
 
@@ -702,7 +723,7 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
     return typeof window !== 'undefined' && typeof fetch === 'function' && typeof Audio !== 'undefined';
   }
 
-  private cleanupAudio(resetMouth?: (level: number) => void) {
+  private cleanupAudio(resetMouth?: (level: number) => void, resetLipSync?: (frame: ReturnType<typeof createRestingLipSyncFrame>) => void, scholarId?: ScholarId) {
     if (this.rafId !== null) {
       window.cancelAnimationFrame(this.rafId);
       this.rafId = null;
@@ -711,6 +732,8 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
       window.clearInterval(this.fallbackEnvelopeTimer);
       this.fallbackEnvelopeTimer = null;
     }
+    this.activeController?.stop();
+    this.activeController = null;
     if (this.sourceNode) {
       try {
         this.sourceNode.disconnect();
@@ -742,6 +765,7 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
       this.objectUrl = null;
     }
     this.isPaused = false;
+    resetLipSync?.(createRestingLipSyncFrame(scholarId));
     resetMouth?.(0);
   }
 
@@ -823,7 +847,7 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
         const complete = (isErr = false, msg?: string) => {
           if (finished || this.playbackToken !== token) return;
           finished = true;
-          this.cleanupAudio(options.onMouthLevel);
+          this.cleanupAudio(options.onMouthLevel, options.onLipSyncFrame, options.scholarId);
           if (isErr) {
             options.onError?.(msg || 'Sunucu ses oynatımı başarısız oldu.');
           } else {
@@ -849,16 +873,32 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
           analyserReady = false;
         }
 
+        const lipController = new TurkishLipSyncController({
+          text,
+          rate: options.rate,
+          scholarId: options.scholarId,
+          syncMode: 'spectral_audio_viseme',
+          requireEnvelopeForAudioGate: analyserReady,
+        });
+        this.activeController = lipController;
+
         const dataBuffer = analyserReady && this.analyser
           ? new Uint8Array(this.analyser.fftSize)
           : null;
-        let smoothedLevel = 0;
+        const freqBuffer = analyserReady && this.analyser
+          ? new Uint8Array(this.analyser.frequencyBinCount)
+          : null;
+
+        const emitRest = () => {
+          options.onLipSyncFrame?.(createRestingLipSyncFrame(options.scholarId));
+          options.onMouthLevel?.(0);
+        };
 
         const tickAnalyser = () => {
           if (finished || this.playbackToken !== token) return;
           if (this.isPaused || audio.paused) {
-            options.onMouthLevel?.(0);
-          } else if (this.analyser && dataBuffer) {
+            emitRest();
+          } else if (this.analyser && dataBuffer && freqBuffer) {
             this.analyser.getByteTimeDomainData(dataBuffer);
             let sumSquares = 0;
             for (let i = 0; i < dataBuffer.length; i++) {
@@ -867,30 +907,61 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
             }
             const rms = Math.sqrt(sumSquares / dataBuffer.length);
             const rawLevel = Math.min(1, Math.max(0, (rms - 0.012) * 5.2));
-            smoothedLevel = smoothedLevel * 0.45 + rawLevel * 0.55;
-            options.onMouthLevel?.(smoothedLevel);
+
+            this.analyser.getByteFrequencyData(freqBuffer);
+            const sampleRate = this.audioCtx?.sampleRate || 48000;
+            const binHz = sampleRate / (this.analyser.fftSize || 256);
+            let lowSum = 0;
+            let midSum = 0;
+            let highSum = 0;
+            for (let b = 1; b < freqBuffer.length; b++) {
+              const hz = b * binHz;
+              const v = freqBuffer[b] / 255;
+              if (hz <= 1100) lowSum += v;
+              else if (hz <= 2900) midSum += v;
+              else if (hz <= 9000) highSum += v;
+            }
+            const totalSum = lowSum + midSum + highSum + 1e-5;
+            const lowRatio = Math.min(1, (lowSum / totalSum) * 1.9);
+            const midRatio = Math.min(1, (midSum / totalSum) * 2.1);
+            const highRatio = Math.min(1, (highSum / totalSum) * 2.4);
+
+            const durMs =
+              Number.isFinite(audio.duration) && audio.duration > 0
+                ? audio.duration * 1000
+                : undefined;
+            lipController.handleProgress(audio.currentTime * 1000, durMs);
+            lipController.handleAudioEnvelope(rawLevel, { lowRatio, midRatio, highRatio });
+            const frame = lipController.sampleFrame();
+            options.onLipSyncFrame?.(frame);
+            options.onMouthLevel?.(frame.level);
           }
           this.rafId = window.requestAnimationFrame(tickAnalyser);
         };
 
         audio.onplay = () => {
           if (finished || this.playbackToken !== token) return;
+          lipController.start();
           options.onStart?.();
           if (analyserReady) {
             if (this.rafId === null) {
               this.rafId = window.requestAnimationFrame(tickAnalyser);
             }
           } else if (this.fallbackEnvelopeTimer === null) {
-            const startTs = performance.now();
             this.fallbackEnvelopeTimer = window.setInterval(() => {
               if (finished || this.playbackToken !== token || this.isPaused || audio.paused) {
-                options.onMouthLevel?.(0);
+                emitRest();
                 return;
               }
-              const t = (performance.now() - startTs) / 1000;
-              const level = Math.max(0.08, Math.min(0.85, 0.34 + 0.36 * Math.abs(Math.sin(t * 7.5))));
-              options.onMouthLevel?.(level);
-            }, 45);
+              const durMs =
+                Number.isFinite(audio.duration) && audio.duration > 0
+                  ? audio.duration * 1000
+                  : undefined;
+              lipController.handleProgress(audio.currentTime * 1000, durMs);
+              const frame = lipController.sampleFrame();
+              options.onLipSyncFrame?.(frame);
+              options.onMouthLevel?.(frame.level);
+            }, 33);
           }
         };
 
@@ -911,6 +982,7 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
 
   pause(): void {
     this.isPaused = true;
+    this.activeController?.pause();
     if (this.audioEl && !this.audioEl.paused) {
       this.audioEl.pause();
     }
@@ -918,6 +990,7 @@ export class ServerNeuralTTSProvider implements ITTSProvider {
 
   resume(): void {
     this.isPaused = false;
+    this.activeController?.resume();
     if (this.audioEl && this.audioEl.paused) {
       this.audioEl.play().catch(() => {
         // ignore
@@ -951,7 +1024,7 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
   private utteranceCounter = 0;
   private isPaused = false;
   private isSpeakingInternal = false;
-  private pulseBoost = 0;
+  private activeController: TurkishLipSyncController | null = null;
   private activeTimer: number | null = null;
   private safetyTimeout: number | null = null;
   private unsubListeners: (() => void) | null = null;
@@ -996,7 +1069,11 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
     let currentSegmentIndex = 0;
     let finished = false;
     let startedNotified = false;
-    const startTime = performance.now();
+
+    const emitRest = () => {
+      options.onLipSyncFrame?.(createRestingLipSyncFrame(options.scholarId));
+      options.onMouthLevel?.(0);
+    };
 
     const finish = (isErr = false, msg?: string) => {
       if (finished || this.playbackToken !== token) return;
@@ -1004,9 +1081,11 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
       this.isSpeakingInternal = false;
       this.activeUtteranceId = null;
       this.isPaused = false;
+      this.activeController?.stop();
+      this.activeController = null;
       this.clearTimers();
       this.detachListeners();
-      options.onMouthLevel?.(0);
+      emitRest();
       if (isErr) {
         options.onError?.(msg || 'Android yerel TTS konuşması kesintiye uğradı.');
       } else {
@@ -1022,19 +1101,14 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
       if (this.activeTimer === null) {
         this.activeTimer = window.setInterval(() => {
           if (this.playbackToken !== token || finished) return;
-          if (this.isPaused || !this.isSpeakingInternal) {
-            options.onMouthLevel?.(0);
+          if (this.isPaused || !this.isSpeakingInternal || !this.activeController) {
+            emitRest();
             return;
           }
-          const t = (performance.now() - startTime) / 1000;
-          this.pulseBoost = Math.max(0, this.pulseBoost * 0.76);
-          const syllableWave =
-            0.22 +
-            0.38 * Math.abs(Math.sin(t * 7.6 * options.rate)) +
-            0.14 * Math.sin(t * 13.5);
-          const level = Math.max(0.05, Math.min(1, syllableWave + this.pulseBoost * 0.36));
-          options.onMouthLevel?.(level);
-        }, 45);
+          const frame = this.activeController.sampleFrame();
+          options.onLipSyncFrame?.(frame);
+          options.onMouthLevel?.(frame.level);
+        }, 33);
       }
     };
 
@@ -1064,6 +1138,12 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
       const segmentText = segments[index];
       const utteranceId = `nuri_${Date.now()}_${++this.utteranceCounter}`;
       this.activeUtteranceId = utteranceId;
+      this.activeController = new TurkishLipSyncController({
+        text: segmentText,
+        rate: options.rate,
+        scholarId: options.scholarId,
+        syncMode: 'engine_boundary_viseme',
+      });
       armSegmentTimeout(segmentText);
 
       const res = await speakNativeAndroid({
@@ -1089,17 +1169,20 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
             if (finished || this.playbackToken !== token) return;
             if (ev.utteranceId !== this.activeUtteranceId) return;
             this.isSpeakingInternal = true;
+            this.activeController?.start();
             ensureLipSyncLoop();
           },
           onRange: (ev) => {
-            if (finished || this.playbackToken !== token) return;
+            if (finished || this.playbackToken !== token || this.isPaused) return;
             if (ev.utteranceId !== this.activeUtteranceId) return;
-            this.pulseBoost = 0.92;
+            this.activeController?.handleBoundary(ev.start, ev.end);
           },
           onDone: (ev) => {
             if (finished || this.playbackToken !== token) return;
             // Guard: only advance when the currently active utterance finishes
             if (ev.utteranceId !== this.activeUtteranceId) return;
+            this.activeController?.stop();
+            emitRest();
             const nextIndex = currentSegmentIndex + 1;
             if (nextIndex < segments.length) {
               void speakSegmentAt(nextIndex);
@@ -1135,6 +1218,7 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
   pause(): void {
     this.isPaused = true;
     this.isSpeakingInternal = false;
+    this.activeController?.pause();
     void pauseNativeAndroid();
   }
 
@@ -1144,6 +1228,7 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
       if (res.ok && res.utteranceId) {
         this.activeUtteranceId = res.utteranceId;
         this.isSpeakingInternal = true;
+        this.activeController?.resume();
       }
     });
   }
@@ -1153,6 +1238,8 @@ export class NativeAndroidTTSProvider implements ITTSProvider {
     this.activeUtteranceId = null;
     this.isSpeakingInternal = false;
     this.isPaused = false;
+    this.activeController?.stop();
+    this.activeController = null;
     this.clearTimers();
     this.detachListeners();
     void stopNativeAndroid();
@@ -1173,6 +1260,8 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
   private playbackToken = 0;
   private utteranceCounter = 0;
   private isPaused = false;
+  private activeController: TurkishLipSyncController | null = null;
+  private activeTimer: number | null = null;
   private safetyTimeout: number | null = null;
   private unsubListeners: (() => void) | null = null;
 
@@ -1180,7 +1269,11 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
     return isSeslenLocalPluginAvailable();
   }
 
-  private clearSafetyTimeout() {
+  private clearTimers() {
+    if (this.activeTimer !== null) {
+      window.clearInterval(this.activeTimer);
+      this.activeTimer = null;
+    }
     if (this.safetyTimeout !== null) {
       window.clearTimeout(this.safetyTimeout);
       this.safetyTimeout = null;
@@ -1215,17 +1308,47 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
     this.activeUtteranceId = utteranceId;
     this.isPaused = false;
 
+    const lipController = new TurkishLipSyncController({
+      text: cleanText,
+      rate: options.rate || 0.94,
+      scholarId: options.scholarId,
+      syncMode: 'pcm_envelope_viseme',
+      requireEnvelopeForAudioGate: true,
+    });
+    this.activeController = lipController;
+
     let finished = false;
     let startedNotified = false;
+
+    const emitRest = () => {
+      options.onLipSyncFrame?.(createRestingLipSyncFrame(options.scholarId));
+      options.onMouthLevel?.(0);
+    };
+
+    const ensureVisemeTimer = () => {
+      if (this.activeTimer !== null) return;
+      this.activeTimer = window.setInterval(() => {
+        if (finished || this.playbackToken !== token) return;
+        if (this.isPaused) {
+          emitRest();
+          return;
+        }
+        const frame = lipController.sampleFrame();
+        options.onLipSyncFrame?.(frame);
+        options.onMouthLevel?.(frame.level);
+      }, 33);
+    };
 
     const finish = (isErr = false, msg?: string) => {
       if (finished || this.playbackToken !== token) return;
       finished = true;
       this.activeUtteranceId = null;
       this.isPaused = false;
-      this.clearSafetyTimeout();
+      this.activeController?.stop();
+      this.activeController = null;
+      this.clearTimers();
       this.detachListeners();
-      options.onMouthLevel?.(0);
+      emitRest();
       if (isErr) {
         options.onError?.(msg || 'Seslen-TTS Hasan sentezi/oynatımı başarısız oldu.');
       } else {
@@ -1234,7 +1357,9 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
     };
 
     const armSafetyTimeout = (timeoutMs = 75000) => {
-      this.clearSafetyTimeout();
+      if (this.safetyTimeout !== null) {
+        window.clearTimeout(this.safetyTimeout);
+      }
       this.safetyTimeout = window.setTimeout(() => {
         if (!finished && this.playbackToken === token && !this.isPaused) {
           void stopSeslenQueue();
@@ -1257,6 +1382,8 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
             if (finished || this.playbackToken !== token) return;
             if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
             armSafetyTimeout(75000);
+            lipController.start();
+            ensureVisemeTimer();
             if (!startedNotified) {
               startedNotified = true;
               options.onStart?.();
@@ -1270,7 +1397,17 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
               lastWatchdogRefreshAt = now;
               armSafetyTimeout(75000);
             }
-            options.onMouthLevel?.(ev.level);
+            if (typeof ev.positionMs === 'number' && Number.isFinite(ev.positionMs)) {
+              lipController.handleProgress(ev.positionMs);
+            }
+            lipController.handleAudioEnvelope(
+              ev.level,
+              typeof ev.hfRatio === 'number' ? { highRatio: ev.hfRatio } : undefined
+            );
+            ensureVisemeTimer();
+            const frame = lipController.sampleFrame();
+            options.onLipSyncFrame?.(frame);
+            options.onMouthLevel?.(frame.level);
           },
           onDone: (ev) => {
             if (finished || this.playbackToken !== token) return;
@@ -1314,12 +1451,17 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
 
   pause(): void {
     this.isPaused = true;
-    this.clearSafetyTimeout();
+    this.activeController?.pause();
+    if (this.safetyTimeout !== null) {
+      window.clearTimeout(this.safetyTimeout);
+      this.safetyTimeout = null;
+    }
     void pauseSeslenQueue();
   }
 
   resume(): void {
     this.isPaused = false;
+    this.activeController?.resume();
     void resumeSeslenQueue();
   }
 
@@ -1327,7 +1469,9 @@ export class SeslenLocalTTSProvider implements ITTSProvider {
     this.playbackToken++;
     this.activeUtteranceId = null;
     this.isPaused = false;
-    this.clearSafetyTimeout();
+    this.activeController?.stop();
+    this.activeController = null;
+    this.clearTimers();
     this.detachListeners();
     void stopSeslenQueue();
   }
@@ -1346,6 +1490,8 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
   private playbackToken = 0;
   private utteranceCounter = 0;
   private isPaused = false;
+  private activeController: TurkishLipSyncController | null = null;
+  private activeTimer: number | null = null;
   private safetyTimeout: number | null = null;
   private unsubListeners: (() => void) | null = null;
 
@@ -1353,7 +1499,11 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
     return isEmaLightningPluginAvailable();
   }
 
-  private clearSafetyTimeout() {
+  private clearTimers() {
+    if (this.activeTimer !== null) {
+      window.clearInterval(this.activeTimer);
+      this.activeTimer = null;
+    }
     if (this.safetyTimeout !== null) {
       window.clearTimeout(this.safetyTimeout);
       this.safetyTimeout = null;
@@ -1388,17 +1538,47 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
     this.activeUtteranceId = utteranceId;
     this.isPaused = false;
 
+    const lipController = new TurkishLipSyncController({
+      text: cleanText,
+      rate: options.rate || 1.0,
+      scholarId: options.scholarId,
+      syncMode: 'pcm_envelope_viseme',
+      requireEnvelopeForAudioGate: true,
+    });
+    this.activeController = lipController;
+
     let finished = false;
     let startedNotified = false;
+
+    const emitRest = () => {
+      options.onLipSyncFrame?.(createRestingLipSyncFrame(options.scholarId));
+      options.onMouthLevel?.(0);
+    };
+
+    const ensureVisemeTimer = () => {
+      if (this.activeTimer !== null) return;
+      this.activeTimer = window.setInterval(() => {
+        if (finished || this.playbackToken !== token) return;
+        if (this.isPaused) {
+          emitRest();
+          return;
+        }
+        const frame = lipController.sampleFrame();
+        options.onLipSyncFrame?.(frame);
+        options.onMouthLevel?.(frame.level);
+      }, 33);
+    };
 
     const finish = (isErr = false, msg?: string) => {
       if (finished || this.playbackToken !== token) return;
       finished = true;
       this.activeUtteranceId = null;
       this.isPaused = false;
-      this.clearSafetyTimeout();
+      this.activeController?.stop();
+      this.activeController = null;
+      this.clearTimers();
       this.detachListeners();
-      options.onMouthLevel?.(0);
+      emitRest();
       if (isErr) {
         options.onError?.(msg || 'EMA Lightning sentezi/oynatımı başarısız oldu.');
       } else {
@@ -1407,7 +1587,9 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
     };
 
     const armSafetyTimeout = (timeoutMs = 75000) => {
-      this.clearSafetyTimeout();
+      if (this.safetyTimeout !== null) {
+        window.clearTimeout(this.safetyTimeout);
+      }
       this.safetyTimeout = window.setTimeout(() => {
         if (!finished && this.playbackToken === token && !this.isPaused) {
           void stopEmaQueue();
@@ -1430,6 +1612,8 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
             if (finished || this.playbackToken !== token) return;
             if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
             armSafetyTimeout(75000);
+            lipController.start();
+            ensureVisemeTimer();
             if (!startedNotified) {
               startedNotified = true;
               options.onStart?.();
@@ -1443,7 +1627,17 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
               lastWatchdogRefreshAt = now;
               armSafetyTimeout(75000);
             }
-            options.onMouthLevel?.(ev.level);
+            if (typeof ev.positionMs === 'number' && Number.isFinite(ev.positionMs)) {
+              lipController.handleProgress(ev.positionMs);
+            }
+            lipController.handleAudioEnvelope(
+              ev.level,
+              typeof ev.hfRatio === 'number' ? { highRatio: ev.hfRatio } : undefined
+            );
+            ensureVisemeTimer();
+            const frame = lipController.sampleFrame();
+            options.onLipSyncFrame?.(frame);
+            options.onMouthLevel?.(frame.level);
           },
           onDone: (ev) => {
             if (finished || this.playbackToken !== token) return;
@@ -1488,12 +1682,17 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
 
   pause(): void {
     this.isPaused = true;
-    this.clearSafetyTimeout();
+    this.activeController?.pause();
+    if (this.safetyTimeout !== null) {
+      window.clearTimeout(this.safetyTimeout);
+      this.safetyTimeout = null;
+    }
     void pauseEmaQueue();
   }
 
   resume(): void {
     this.isPaused = false;
+    this.activeController?.resume();
     void resumeEmaQueue();
   }
 
@@ -1501,7 +1700,9 @@ export class EmaLightningLocalTTSProvider implements ITTSProvider {
     this.playbackToken++;
     this.activeUtteranceId = null;
     this.isPaused = false;
-    this.clearSafetyTimeout();
+    this.activeController?.stop();
+    this.activeController = null;
+    this.clearTimers();
     this.detachListeners();
     void stopEmaQueue();
   }
@@ -1519,6 +1720,8 @@ export class ZerreLocalTTSProvider implements ITTSProvider {
   private playbackToken = 0;
   private activeUtteranceId: string | null = null;
   private isPaused = false;
+  private activeController: TurkishLipSyncController | null = null;
+  private activeTimer: number | null = null;
   private safetyTimeout: number | null = null;
   private unsubListeners: (() => void) | null = null;
   private utteranceCounter = 0;
@@ -1527,7 +1730,11 @@ export class ZerreLocalTTSProvider implements ITTSProvider {
     return isZerrePluginAvailable();
   }
 
-  private clearSafetyTimeout() {
+  private clearTimers() {
+    if (this.activeTimer !== null) {
+      window.clearInterval(this.activeTimer);
+      this.activeTimer = null;
+    }
     if (this.safetyTimeout !== null) {
       window.clearTimeout(this.safetyTimeout);
       this.safetyTimeout = null;
@@ -1562,17 +1769,47 @@ export class ZerreLocalTTSProvider implements ITTSProvider {
     this.activeUtteranceId = utteranceId;
     this.isPaused = false;
 
+    const lipController = new TurkishLipSyncController({
+      text: cleanText,
+      rate: options.rate || 0.94,
+      scholarId: options.scholarId,
+      syncMode: 'pcm_envelope_viseme',
+      requireEnvelopeForAudioGate: true,
+    });
+    this.activeController = lipController;
+
     let finished = false;
     let startedNotified = false;
+
+    const emitRest = () => {
+      options.onLipSyncFrame?.(createRestingLipSyncFrame(options.scholarId));
+      options.onMouthLevel?.(0);
+    };
+
+    const ensureVisemeTimer = () => {
+      if (this.activeTimer !== null) return;
+      this.activeTimer = window.setInterval(() => {
+        if (finished || this.playbackToken !== token) return;
+        if (this.isPaused) {
+          emitRest();
+          return;
+        }
+        const frame = lipController.sampleFrame();
+        options.onLipSyncFrame?.(frame);
+        options.onMouthLevel?.(frame.level);
+      }, 33);
+    };
 
     const finish = (isErr = false, msg?: string) => {
       if (finished || this.playbackToken !== token) return;
       finished = true;
       this.activeUtteranceId = null;
       this.isPaused = false;
-      this.clearSafetyTimeout();
+      this.activeController?.stop();
+      this.activeController = null;
+      this.clearTimers();
       this.detachListeners();
-      options.onMouthLevel?.(0);
+      emitRest();
       if (isErr) {
         options.onError?.(msg || 'Zerre SES-A (MK) sentezi/oynatımı başarısız oldu.');
       } else {
@@ -1581,7 +1818,9 @@ export class ZerreLocalTTSProvider implements ITTSProvider {
     };
 
     const armSafetyTimeout = (timeoutMs = 75000) => {
-      this.clearSafetyTimeout();
+      if (this.safetyTimeout !== null) {
+        window.clearTimeout(this.safetyTimeout);
+      }
       this.safetyTimeout = window.setTimeout(() => {
         if (!finished && this.playbackToken === token && !this.isPaused) {
           void stopZerreQueue();
@@ -1604,6 +1843,8 @@ export class ZerreLocalTTSProvider implements ITTSProvider {
             if (finished || this.playbackToken !== token) return;
             if (ev.utteranceId && ev.utteranceId !== this.activeUtteranceId) return;
             armSafetyTimeout(75000);
+            lipController.start();
+            ensureVisemeTimer();
             if (!startedNotified) {
               startedNotified = true;
               options.onStart?.();
@@ -1617,7 +1858,17 @@ export class ZerreLocalTTSProvider implements ITTSProvider {
               lastWatchdogRefreshAt = now;
               armSafetyTimeout(75000);
             }
-            options.onMouthLevel?.(ev.level);
+            if (typeof ev.positionMs === 'number' && Number.isFinite(ev.positionMs)) {
+              lipController.handleProgress(ev.positionMs);
+            }
+            lipController.handleAudioEnvelope(
+              ev.level,
+              typeof ev.hfRatio === 'number' ? { highRatio: ev.hfRatio } : undefined
+            );
+            ensureVisemeTimer();
+            const frame = lipController.sampleFrame();
+            options.onLipSyncFrame?.(frame);
+            options.onMouthLevel?.(frame.level);
           },
           onDone: (ev) => {
             if (finished || this.playbackToken !== token) return;
@@ -1661,12 +1912,17 @@ export class ZerreLocalTTSProvider implements ITTSProvider {
 
   pause(): void {
     this.isPaused = true;
-    this.clearSafetyTimeout();
+    this.activeController?.pause();
+    if (this.safetyTimeout !== null) {
+      window.clearTimeout(this.safetyTimeout);
+      this.safetyTimeout = null;
+    }
     void pauseZerreQueue();
   }
 
   resume(): void {
     this.isPaused = false;
+    this.activeController?.resume();
     void resumeZerreQueue();
   }
 
@@ -1674,7 +1930,9 @@ export class ZerreLocalTTSProvider implements ITTSProvider {
     this.playbackToken++;
     this.activeUtteranceId = null;
     this.isPaused = false;
-    this.clearSafetyTimeout();
+    this.activeController?.stop();
+    this.activeController = null;
+    this.clearTimers();
     this.detachListeners();
     void stopZerreQueue();
   }

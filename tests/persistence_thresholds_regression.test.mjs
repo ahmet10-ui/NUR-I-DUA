@@ -7,12 +7,15 @@ import { EventEmitter } from 'node:events';
 
 import { createRelayServer } from '../relay-server/server.mjs';
 import {
+  createDefaultAppState,
   DEFAULT_HIGH_TIER_DUAS,
   DEFAULT_MID_OPENING_PRAYERS,
   DEFAULT_PRAYERS,
   DEFAULT_TIER_RULES,
   DEFAULT_YASIN_RECITATION,
   LEGACY_DEFAULT_TIER_THRESHOLDS,
+  mergeBuiltInHighTierDuas,
+  mergeScholarSettingsWithPureWhiteCaps,
 } from '../src/data/defaults.ts';
 import {
   classifyGiftInteraction,
@@ -194,10 +197,12 @@ test('Boundary matrix (1, 10, 11, 35, 36, 60, 61, 199, 200) maps accurately whil
     }
   }
 
-  // Verify existing prayer pools remain strictly unchanged (count, categories, Yâsîn config)
+  // Verify existing prayer pools remain strictly intact (high-tier expanded to 8, Yâsîn SHA-256 unchanged)
   assert.equal(DEFAULT_MID_OPENING_PRAYERS.length, 5);
   assert.equal(DEFAULT_PRAYERS.length, 13);
-  assert.equal(DEFAULT_HIGH_TIER_DUAS.length, 2);
+  assert.equal(DEFAULT_HIGH_TIER_DUAS.length, 8);
+  assert.equal(DEFAULT_HIGH_TIER_DUAS[0].id, 'high-dua-amenerrasulu');
+  assert.equal(DEFAULT_HIGH_TIER_DUAS[1].id, 'high-dua-fatiha');
   assert.equal(DEFAULT_YASIN_RECITATION.audioStatus, 'verified_ready');
   assert.equal(
     DEFAULT_YASIN_RECITATION.audioSha256,
@@ -445,5 +450,51 @@ test('Centralized thresholds (1, 10, 11, 35, 36, 199, 200) leave zero 36–60 ·
     assert.equal(result.shouldEnqueue, true);
     assert.equal(result.tier, expectedTier, `coins=${coins} must map to ${expectedTier}`);
   }
+});
+
+test('Scholar default takkes are pure white (#FFFFFF) and legacy saved state migrates caps and merges new high-tier duas', () => {
+  const defaults = createDefaultAppState();
+  assert.equal(defaults.scholars.profiles.scholar_1.capColor, '#FFFFFF');
+  assert.equal(defaults.scholars.profiles.scholar_2.capColor, '#FFFFFF');
+  assert.equal(defaults.scholars.profiles.scholar_1.name, 'Hacı Ahmet Efendi');
+  assert.equal(defaults.scholars.profiles.scholar_2.name, 'Hacı Mehmet Efendi');
+
+  // Legacy blue saved capColors migrate cleanly to pure white without changing names/jacket/beard/spectacles
+  const migratedScholars = mergeScholarSettingsWithPureWhiteCaps({
+    profiles: {
+      scholar_1: { ...defaults.scholars.profiles.scholar_1, capColor: '#1E3A8A' },
+      scholar_2: { ...defaults.scholars.profiles.scholar_2, capColor: '#1D4ED8' },
+    },
+  });
+  assert.equal(migratedScholars.profiles.scholar_1.capColor, '#FFFFFF');
+  assert.equal(migratedScholars.profiles.scholar_2.capColor, '#FFFFFF');
+  assert.equal(migratedScholars.profiles.scholar_1.hasSpectacles, true);
+  assert.equal(migratedScholars.profiles.scholar_2.hasSpectacles, false);
+
+  // Legacy 2-entry saved highTierDuas preserves user customizations while merging 6 new built-in entries
+  const customEditedFirst = {
+    ...DEFAULT_HIGH_TIER_DUAS[0],
+    title: 'Özel Düzenlenmiş Âmenerrasûlü',
+  };
+  const legacyPendingIhlas = {
+    ...DEFAULT_HIGH_TIER_DUAS.find((d) => d.id === 'high-dua-ihlas'),
+    audioUrl: '',
+    audioLicense: 'Doğrulanmamış / Lisanslı Kârî Kaydı Bekleniyor',
+    audioStatus: 'pending_license_verification',
+    personalPrayerTemplate: 'Özel İhlâs duası: {isim} kardeşimize ve ailesine afiyet ver. Âmin.',
+  };
+  const mergedDuas = mergeBuiltInHighTierDuas([
+    customEditedFirst,
+    DEFAULT_HIGH_TIER_DUAS[1],
+    legacyPendingIhlas,
+  ]);
+  assert.equal(mergedDuas.length, 8);
+  assert.equal(mergedDuas[0].title, 'Özel Düzenlenmiş Âmenerrasûlü');
+  const upgradedIhlas = mergedDuas.find((d) => d.id === 'high-dua-ihlas');
+  assert.equal(upgradedIhlas.audioStatus, 'verified_ready');
+  assert.equal(upgradedIhlas.audioUrl, '/audio/duas/ihlas_112_aaqib_azeez_cc0.mp3');
+  assert.equal(upgradedIhlas.personalPrayerTemplate, legacyPendingIhlas.personalPrayerTemplate);
+  assert.ok(mergedDuas.some((d) => d.id === 'high-dua-ayetel-kursi'));
+  assert.ok(mergedDuas.some((d) => d.id === 'high-dua-salati-tefriciye'));
 });
 

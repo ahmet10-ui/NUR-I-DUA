@@ -67,13 +67,39 @@ export function extractSignatureTokensFromUrl(rawUrl) {
   return tokens;
 }
 
+const ALLOWED_SIGNER_PROVIDERS = new Set([
+  'auto',
+  'custom_full',
+  'custom_ws',
+  'custom_http',
+  'tiktok_signer',
+  'euler',
+  'none',
+  'disabled',
+]);
+
+function parseBooleanEnv(val) {
+  const norm = String(val || '').trim().toLowerCase();
+  return norm === 'true' || norm === '1' || norm === 'yes';
+}
+
 export function resolveSignerConfiguration(env = process.env) {
+  const rawProvider = String(env.TIKTOK_SIGNER_PROVIDER || 'auto').trim().toLowerCase();
+  if (rawProvider && !ALLOWED_SIGNER_PROVIDERS.has(rawProvider)) {
+    throw new Error(
+      `Geçersiz TIKTOK_SIGNER_PROVIDER değeri: "${rawProvider}". Desteklenen değerler: auto, custom_full, custom_ws, custom_http, tiktok_signer, euler, none.`
+    );
+  }
+  const requestedProvider = rawProvider || 'auto';
+
   const disableEuler =
-    String(env.DISABLE_EULER || '').trim().toLowerCase() === 'true' ||
-    String(env.DISABLE_EULER || '').trim() === '1';
+    parseBooleanEnv(env.DISABLE_EULER) ||
+    requestedProvider === 'none' ||
+    requestedProvider === 'disabled';
   const signApiKey = String(env.SIGN_API_KEY || '').trim();
   const allowEulerBusinessSign =
-    String(env.ALLOW_EULER_BUSINESS_SIGN || '').trim().toLowerCase() === 'true' &&
+    !disableEuler &&
+    parseBooleanEnv(env.ALLOW_EULER_BUSINESS_SIGN) &&
     Boolean(signApiKey);
 
   const legacySignServerUrl = validateExternalSignerUrl(env.SIGN_SERVER_URL, 'SIGN_SERVER_URL');
@@ -83,43 +109,91 @@ export function resolveSignerConfiguration(env = process.env) {
     'HTTP_SIGN_SERVER_URL'
   );
 
-  const wsSignUrl = explicitWsSignUrl || legacySignServerUrl;
-
+  // When TIKTOK_SIGNER_PROVIDER=tiktok_signer and only SIGN_SERVER_URL is set,
+  // treat SIGN_SERVER_URL (or `<origin>/sign` if root path) as the HTTP signer URL rather than a WS proxy.
+  let wsSignUrl = explicitWsSignUrl;
   let httpSignUrl = explicitHttpSignUrl;
-  if (!httpSignUrl && legacySignServerUrl) {
-    const parsedLegacy = new URL(legacySignServerUrl);
-    if (
-      (parsedLegacy.pathname === '' || parsedLegacy.pathname === '/') &&
-      String(env.SIGN_SERVER_HTTP_ENABLED || '').trim().toLowerCase() === 'true'
-    ) {
-      httpSignUrl = `${parsedLegacy.origin}/sign`;
+
+  if (requestedProvider === 'tiktok_signer' || requestedProvider === 'custom_http') {
+    if (!httpSignUrl && legacySignServerUrl) {
+      const parsedLegacy = new URL(legacySignServerUrl);
+      httpSignUrl =
+        parsedLegacy.pathname === '' || parsedLegacy.pathname === '/'
+          ? `${parsedLegacy.origin}/sign`
+          : legacySignServerUrl;
+    }
+  } else {
+    wsSignUrl = explicitWsSignUrl || legacySignServerUrl;
+    if (!httpSignUrl && legacySignServerUrl) {
+      const parsedLegacy = new URL(legacySignServerUrl);
+      if (
+        (parsedLegacy.pathname === '' || parsedLegacy.pathname === '/') &&
+        parseBooleanEnv(env.SIGN_SERVER_HTTP_ENABLED)
+      ) {
+        httpSignUrl = `${parsedLegacy.origin}/sign`;
+      }
     }
   }
 
+  const httpMethodPref = String(env.SIGN_SERVER_HTTP_METHOD || 'POST').trim().toUpperCase();
+  const signerHttpMethod = httpMethodPref === 'GET' ? 'GET' : 'POST';
   const signerToken = String(env.SIGN_SERVER_TOKEN || '').trim() || null;
   const timeoutMs = Math.max(
     2000,
     Math.min(30_000, Number(env.SIGN_SERVER_TIMEOUT_MS || DEFAULT_SIGN_TIMEOUT_MS) || DEFAULT_SIGN_TIMEOUT_MS)
   );
 
-  const eulerFallbackDisabled = Boolean(disableEuler || wsSignUrl);
-  const eulerBusinessEndpointBlocked = !allowEulerBusinessSign;
-
+  let activeSignerProvider = 'euler';
   let signerMode = 'euler_free_ws_direct_gifts';
-  if (wsSignUrl && httpSignUrl) {
-    signerMode = 'custom_full';
-  } else if (wsSignUrl) {
-    signerMode = 'custom_ws_direct_gifts';
-  } else if (disableEuler) {
+
+  if (requestedProvider === 'none' || requestedProvider === 'disabled') {
+    activeSignerProvider = 'none';
     signerMode = 'custom_required_disabled';
-  } else if (httpSignUrl) {
-    signerMode = 'custom_http_euler_free_ws';
+    wsSignUrl = null;
+    httpSignUrl = null;
+  } else if (requestedProvider === 'euler') {
+    if (disableEuler) {
+      activeSignerProvider = 'none';
+      signerMode = 'custom_required_disabled';
+    } else {
+      activeSignerProvider = 'euler';
+      signerMode = allowEulerBusinessSign ? 'euler_business_opt_in' : 'euler_free_ws_direct_gifts';
+    }
+  } else if (requestedProvider === 'tiktok_signer') {
+    activeSignerProvider = 'tiktok_signer';
+    signerMode = wsSignUrl ? 'tiktok_signer_with_ws' : 'tiktok_signer_http';
+  } else if (requestedProvider === 'custom_full' || (requestedProvider === 'auto' && wsSignUrl && httpSignUrl)) {
+    activeSignerProvider = 'custom_full';
+    signerMode = 'custom_full';
+  } else if (requestedProvider === 'custom_ws' || (requestedProvider === 'auto' && wsSignUrl)) {
+    activeSignerProvider = 'custom_ws';
+    signerMode = 'custom_ws_direct_gifts';
+  } else if (requestedProvider === 'custom_http' || (requestedProvider === 'auto' && httpSignUrl)) {
+    activeSignerProvider = 'custom_http';
+    signerMode = disableEuler ? 'custom_http_no_euler' : 'custom_http_euler_free_ws';
+  } else if (disableEuler) {
+    activeSignerProvider = 'none';
+    signerMode = 'custom_required_disabled';
   }
 
+  // Strictly block silent Euler fallbacks whenever Euler is disabled OR an explicit non-Euler provider is selected
+  const eulerFallbackDisabled = Boolean(
+    disableEuler ||
+      wsSignUrl ||
+      requestedProvider === 'custom_full' ||
+      requestedProvider === 'custom_ws' ||
+      requestedProvider === 'custom_http' ||
+      requestedProvider === 'tiktok_signer'
+  );
+  const eulerBusinessEndpointBlocked = !allowEulerBusinessSign;
+
   return {
+    requestedProvider,
+    activeSignerProvider,
     signerMode,
     wsSignUrl,
     httpSignUrl,
+    signerHttpMethod,
     hasCustomWsSigner: Boolean(wsSignUrl),
     hasCustomHttpSigner: Boolean(httpSignUrl),
     hasSignServerUrl: Boolean(wsSignUrl || httpSignUrl),
@@ -140,6 +214,18 @@ function buildSignerHeaders(baseAccept, signerToken) {
     headers['x-api-key'] = signerToken;
   }
   return headers;
+}
+
+function parseRetryAfterHeader(resp) {
+  const raw = resp?.headers?.get?.('retry-after');
+  if (!raw) return null;
+  const num = Number(raw);
+  if (Number.isFinite(num) && num > 0) return Math.ceil(num);
+  const ts = Date.parse(raw);
+  if (Number.isFinite(ts) && ts > Date.now()) {
+    return Math.max(1, Math.ceil((ts - Date.now()) / 1000));
+  }
+  return null;
 }
 
 export async function requestCustomSignedWebSocket({
@@ -186,6 +272,12 @@ export async function requestCustomSignedWebSocket({
 
   if (!resp.ok) {
     const snippet = rawBuffer.toString('utf8', 0, 240).trim();
+    const retryAfterSec = parseRetryAfterHeader(resp);
+    if (resp.status === 429) {
+      throw new Error(
+        `[Rate Limited] [fetchSignedWebSocketFromProvider] Harici WS imzalama sunucusu HTTP 429 döndürdü${retryAfterSec ? ` (retryAfterSec=${retryAfterSec})` : ''}${snippet ? `: ${snippet}` : '.'}`
+      );
+    }
     throw new Error(
       `[fetchSignedWebSocketFromProvider] Harici WS imzalama sunucusu HTTP ${resp.status} döndürdü${snippet ? `: ${snippet}` : '.'}`
     );
@@ -239,7 +331,6 @@ export async function requestCustomSignedWebSocket({
       );
     }
 
-    // Strict base64 decode guard
     const cleanedB64 = b64.trim().replace(/\s+/g, '');
     if (!/^[A-Za-z0-9+/=]+$/.test(cleanedB64)) {
       throw new Error(
@@ -302,9 +393,35 @@ export async function requestCustomSignedWebSocket({
   };
 }
 
+function collectTokenFields(resObj) {
+  if (!resObj || typeof resObj !== 'object') return {};
+  const candidateMap = {
+    ...(resObj.tokens && typeof resObj.tokens === 'object' ? resObj.tokens : {}),
+  };
+  const keyAliases = [
+    ['X-Bogus', ['X-Bogus', 'xBogus', 'x_bogus', 'xbogus']],
+    ['X-Gnarly', ['X-Gnarly', 'xGnarly', 'x_gnarly', 'xgnarly']],
+    ['msToken', ['msToken', 'ms_token', 'mstoken']],
+    ['_signature', ['_signature', 'signature']],
+    ['verifyFp', ['verifyFp', 'verify_fp']],
+  ];
+  for (const [canonical, aliases] of keyAliases) {
+    if (candidateMap[canonical]) continue;
+    for (const alias of aliases) {
+      const val = resObj[alias];
+      if (val !== undefined && val !== null && String(val).trim()) {
+        candidateMap[canonical] = String(val).trim();
+        break;
+      }
+    }
+  }
+  return candidateMap;
+}
+
 export async function requestCustomWebcastSignature({
   httpSignUrl,
   signerToken,
+  signerHttpMethod = 'POST',
   timeoutMs = DEFAULT_SIGN_TIMEOUT_MS,
   fetchImpl = fetch,
   url,
@@ -319,30 +436,58 @@ export async function requestCustomWebcastSignature({
   }
 
   const cleanUrl = stripSignatureQueryParams(url);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  let resp;
-  let text;
-  try {
-    resp = await fetchImpl(httpSignUrl, {
-      method: 'POST',
-      headers: {
-        ...buildSignerHeaders('application/json', signerToken),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url: cleanUrl,
-        method: String(method || 'GET').toUpperCase(),
-        userAgent: String(userAgent || webClient?.clientHeaders?.['User-Agent'] || ''),
-      }),
-      signal: controller.signal,
-    });
-    text = await resp.text();
-  } finally {
-    clearTimeout(timer);
+  const resolvedInputUa = String(userAgent || webClient?.clientHeaders?.['User-Agent'] || '');
+
+  const invokeHttpSigner = async (reqMethod) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      if (reqMethod === 'GET') {
+        const target = new URL(httpSignUrl);
+        target.searchParams.set('url', cleanUrl);
+        target.searchParams.set('method', String(method || 'GET').toUpperCase());
+        if (resolvedInputUa) target.searchParams.set('userAgent', resolvedInputUa);
+        const r = await fetchImpl(target.toString(), {
+          method: 'GET',
+          headers: buildSignerHeaders('application/json', signerToken),
+          signal: controller.signal,
+        });
+        const t = await r.text();
+        return { resp: r, text: t };
+      }
+      const r = await fetchImpl(httpSignUrl, {
+        method: 'POST',
+        headers: {
+          ...buildSignerHeaders('application/json', signerToken),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          url: cleanUrl,
+          method: String(method || 'GET').toUpperCase(),
+          userAgent: resolvedInputUa,
+        }),
+        signal: controller.signal,
+      });
+      const t = await r.text();
+      return { resp: r, text: t };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  let { resp, text } = await invokeHttpSigner(signerHttpMethod);
+  // Some nglmercer/tiktok-signer deployments expose GET /sign?url=... instead of POST /sign
+  if (resp.status === 405 && signerHttpMethod === 'POST') {
+    ({ resp, text } = await invokeHttpSigner('GET'));
   }
 
   if (!resp.ok) {
+    const retryAfterSec = parseRetryAfterHeader(resp);
+    if (resp.status === 429) {
+      throw new Error(
+        `[Rate Limited] [fetchWebcastSignatureFromProvider] Harici HTTP imzalama sunucusu HTTP 429 döndürdü${retryAfterSec ? ` (retryAfterSec=${retryAfterSec})` : ''}${text ? `: ${text.slice(0, 200)}` : '.'}`
+      );
+    }
     throw new Error(
       `[fetchWebcastSignatureFromProvider] Harici HTTP imzalama sunucusu HTTP ${resp.status} döndürdü${text ? `: ${text.slice(0, 200)}` : '.'}`
     );
@@ -369,10 +514,30 @@ export async function requestCustomWebcastSignature({
     );
   }
 
-  const resObj = json?.response && typeof json.response === 'object' ? json.response : json;
-  const signedUrl = String(
+  const resObj =
+    json?.response && typeof json.response === 'object'
+      ? json.response
+      : json?.data && typeof json.data === 'object'
+      ? json.data
+      : json;
+
+  const explicitTokens = collectTokenFields(resObj);
+  let signedUrl = String(
     resObj?.signedUrl || resObj?.signed_url || resObj?.url || ''
   ).trim();
+
+  // Support token-only responses (e.g. nglmercer/tiktok-signer returning { X-Bogus, X-Gnarly, msToken, navigator })
+  if (!signedUrl && Object.keys(explicitTokens).length > 0) {
+    try {
+      const rebuilt = new URL(cleanUrl);
+      for (const [k, v] of Object.entries(explicitTokens)) {
+        if (v) rebuilt.searchParams.set(k, v);
+      }
+      signedUrl = rebuilt.toString();
+    } catch {
+      signedUrl = '';
+    }
+  }
 
   if (!signedUrl) {
     throw new Error(
@@ -395,8 +560,6 @@ export async function requestCustomWebcastSignature({
   }
 
   const extractedTokens = extractSignatureTokensFromUrl(signedUrl);
-  const explicitTokens =
-    resObj?.tokens && typeof resObj.tokens === 'object' ? resObj.tokens : {};
   const mergedTokens = {};
   for (const [k, v] of Object.entries({ ...extractedTokens, ...explicitTokens })) {
     if (v !== undefined && v !== null && String(v).trim()) {
@@ -413,6 +576,8 @@ export async function requestCustomWebcastSignature({
   const resolvedUa = String(
     resObj?.userAgent ||
       resObj?.user_agent ||
+      resObj?.navigator?.user_agent ||
+      resObj?.navigator?.userAgent ||
       userAgent ||
       webClient?.clientHeaders?.['User-Agent'] ||
       ''
@@ -464,8 +629,9 @@ let cachedOriginalConnectorState = null;
 /**
  * Configures tiktok-live-connector RouteConfig & Euler fallback guards cleanly:
  * - Never calls Euler's Business-only /webcast/sign_url unless ALLOW_EULER_BUSINESS_SIGN=true + SIGN_API_KEY
- * - Routes RouteConfig.fetchWebcastSignatureFromProvider to HTTP_SIGN_SERVER_URL when configured
- * - Routes RouteConfig.fetchSignedWebSocketFromProvider to WS_SIGN_SERVER_URL / SIGN_SERVER_URL when configured
+ * - Never silently falls back to Euler when a custom signer or DISABLE_EULER=true is selected
+ * - Routes RouteConfig.fetchWebcastSignatureFromProvider to HTTP_SIGN_SERVER_URL (or tiktok-signer) when configured
+ * - Routes RouteConfig.fetchSignedWebSocketFromProvider to WS_SIGN_SERVER_URL / SIGN_SERVER_URL, or HTTP-signed im/fetch when custom HTTP signer is active without a WS proxy
  * - Routes RouteConfig.fetchRoomGifts directly to TikTok gift/list/ without Euler Business when no HTTP signer exists
  */
 export function configureTikTokConnectorRoutes(mod, env = process.env, deps = {}) {
@@ -509,6 +675,7 @@ export function configureTikTokConnectorRoutes(mod, env = process.env, deps = {}
       requestCustomWebcastSignature({
         httpSignUrl: config.httpSignUrl,
         signerToken: config.signerToken,
+        signerHttpMethod: config.signerHttpMethod,
         timeoutMs: config.timeoutMs,
         fetchImpl,
         url,
@@ -516,7 +683,7 @@ export function configureTikTokConnectorRoutes(mod, env = process.env, deps = {}
         userAgent,
         webClient,
       });
-  } else if (config.allowEulerBusinessSign) {
+  } else if (config.allowEulerBusinessSign && !config.eulerFallbackDisabled) {
     mod.RouteConfig.fetchWebcastSignatureFromProvider =
       cachedOriginalConnectorState.fetchWebcastSignatureFromProvider;
   } else {
@@ -549,10 +716,75 @@ export function configureTikTokConnectorRoutes(mod, env = process.env, deps = {}
         country,
         userAgent: webClient?.clientHeaders?.['User-Agent'],
       });
-  } else if (config.disableEuler) {
+  } else if (
+    config.httpSignUrl &&
+    (config.eulerFallbackDisabled ||
+      config.activeSignerProvider === 'tiktok_signer' ||
+      config.activeSignerProvider === 'custom_http')
+  ) {
+    // Direct HTTP-signed TikTok webcast/im/fetch/ handshake (zero Euler dependency)
+    mod.RouteConfig.fetchSignedWebSocketFromProvider = async ({
+      roomId,
+      cursor,
+      webClient,
+    }) => {
+      if (!webClient || typeof webClient.request !== 'function') {
+        throw new Error(
+          '[fetchSignedWebSocketFromProvider] HTTP imzalayıcı modu için webClient bulunamadı.'
+        );
+      }
+      const webcastHost = webClient?._webcastWebConfig?.TIKTOK_HOST_WEBCAST || 'webcast.tiktok.com';
+      const resp = await webClient.request({
+        host: webcastHost,
+        path: 'webcast/im/fetch/',
+        searchParams: {
+          ...webClient.clientParams,
+          room_id: String(roomId || webClient.roomId || ''),
+          cursor: String(cursor || ''),
+          fetch_rule: '1',
+          last_rtt: '0',
+          resp_content_type: 'protobuf',
+        },
+        signRequest: true,
+        responseType: 'buffer',
+      });
+      const bodyBuf = Buffer.isBuffer(resp?.body)
+        ? resp.body
+        : Buffer.from(resp?.body || '');
+      if (!bodyBuf.length) {
+        throw new Error(
+          '[Empty Payload] [fetchSignedWebSocketFromProvider] TikTok webcast/im/fetch/ boş protobuf döndürdü.'
+        );
+      }
+      const fetchResult = mod.deserializeMessage('ProtoMessageFetchResult', bodyBuf);
+      if (!fetchResult?.cursor || !/^wss?:\/\//i.test(String(fetchResult?.pushServer || ''))) {
+        throw new Error(
+          '[Empty Payload] [fetchSignedWebSocketFromProvider] TikTok webcast/im/fetch/ geçerli cursor/pushServer döndürmedi.'
+        );
+      }
+      const rawSetCookie = resp?.headers?.['set-cookie'];
+      const headerCookie = Array.isArray(rawSetCookie)
+        ? rawSetCookie.join('; ')
+        : typeof rawSetCookie === 'string'
+        ? rawSetCookie
+        : '';
+      const jarCookie = (await webClient.cookieJar?.getCookieString?.()) || '';
+      const cookieHeader = headerCookie || jarCookie;
+      if (!cookieHeader.trim()) {
+        throw new Error(
+          '[Empty Cookies] [fetchSignedWebSocketFromProvider] İmzalı webcast/im/fetch/ yanıtında TikTok oturum çerezi bulunamadı.'
+        );
+      }
+      return {
+        fetchResult,
+        fetchResultCookieHeader: cookieHeader.trim(),
+        fetchResultRoomId: roomId ? String(roomId) : undefined,
+      };
+    };
+  } else if (config.eulerFallbackDisabled) {
     mod.RouteConfig.fetchSignedWebSocketFromProvider = async () => {
       throw new Error(
-        '[fetchSignedWebSocketFromProvider] DISABLE_EULER=true iken harici WS imzalama sunucusu (WS_SIGN_SERVER_URL veya SIGN_SERVER_URL) yapılandırılmadı.'
+        '[fetchSignedWebSocketFromProvider] EulerStream devre dışı iken harici imzalama sunucusu (WS_SIGN_SERVER_URL, HTTP_SIGN_SERVER_URL veya SIGN_SERVER_URL) yapılandırılmadı.'
       );
     };
   } else {
@@ -561,13 +793,13 @@ export function configureTikTokConnectorRoutes(mod, env = process.env, deps = {}
   }
 
   // 4. Room Gifts Route (`RouteConfig.fetchRoomGifts`)
-  // Avoids Euler Business `/webcast/sign_url`: uses custom HTTP signer when configured,
-  // otherwise calls TikTok `webcast/gift/list/` directly (`signRequest: false`) with soft fallback.
   mod.RouteConfig.fetchRoomGifts = async ({ webClient, roomId = webClient?.roomId }) => {
     if (!roomId) {
       throw new Error('[fetchRoomGiftsRoute] Missing roomId.');
     }
-    const useSigned = Boolean(config.httpSignUrl || config.allowEulerBusinessSign);
+    const useSigned = Boolean(
+      config.httpSignUrl || (config.allowEulerBusinessSign && !config.eulerFallbackDisabled)
+    );
     try {
       const res = await webClient.getJsonObjectFromWebcastApi(
         'gift/list/',
@@ -588,7 +820,6 @@ export function configureTikTokConnectorRoutes(mod, env = process.env, deps = {}
       if (useSigned) {
         throw err;
       }
-      // Best-effort catalog: live gift messages still carry inline giftDetails
       console.warn(
         `[NUR-I DUA Relay] gift/list/ kataloğu alınamadı (canlı yayın bağlantısı devam ediyor): ${err instanceof Error ? err.message : String(err)}`
       );
@@ -598,3 +829,4 @@ export function configureTikTokConnectorRoutes(mod, env = process.env, deps = {}
 
   return config;
 }
+

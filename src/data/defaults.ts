@@ -4,6 +4,7 @@ import {
   HighTierDuaEntry,
   PrayerCategoryMeta,
   PrayerTemplate,
+  ScholarSettingsConfig,
   TierRuleConfig,
   YasinRecitationConfig,
 } from '../types/nuridua';
@@ -244,7 +245,127 @@ export const DEFAULT_HIGH_TIER_DUAS: HighTierDuaEntry[] = [
     isActive: true,
     updatedAt: nowIso(),
   },
+  {
+    id: 'high-dua-ayetel-kursi',
+    title: 'Âyetel Kürsî (Bakara Sûresi 2:255)',
+    sourceCitation:
+      'Kur’ân-ı Kerîm, Bakara Sûresi 2:255 · Metin: Quran.com / Tanzil Uthmani · Meal: Diyanet İşleri Başkanlığı · Ses: Qari Aaqib Azeez (Wikimedia Commons, CC BY-SA 4.0)',
+    arabicHarekeli:
+      'ٱللَّهُ لَآ إِلَـٰهَ إِلَّا هُوَ ٱلْحَىُّ ٱلْقَيُّومُ ۚ لَا تَأْخُذُهُۥ سِنَةٌ وَلَا نَوْمٌ ۚ لَّهُۥ مَا فِى ٱلسَّمَـٰوَٰتِ وَمَا فِى ٱلْأَرْضِ ۗ مَن ذَا ٱلَّذِى يَشْفَعُ عِندَهُۥٓ إِلَّا بِإِذْنِهِۦ ۚ يَعْلَمُ مَا بَيْنَ أَيْدِيهِمْ وَمَا خَلْفَهُمْ ۖ وَلَا يُحِيطُونَ بِشَىْءٍ مِّنْ عِلْمِهِۦٓ إِلَّا بِمَا شَآءَ ۚ وَسِعَ كُرْسِيُّهُ ٱلسَّمَـٰوَٰتِ وَٱلْأَرْضَ ۖ وَلَا يَـُٔودُهُۥ حِفْظُهُمَا ۚ وَهُوَ ٱلْعَلِىُّ ٱلْعَظِيمُ',
+    turkishMeaning:
+      'Bakara Sûresi 255. ayetin meali: Allah, O’ndan başka ilâh yoktur; diridir, her şeyin varlığı O’na bağlı ve dayalıdır. Ne uykusu gelir ne de uyur. Göklerde ve yerde ne varsa hepsi O’nundur. O’nun izni olmadıkça katında hiçbir kimse şefaat edemez. Onların önlerinde ve arkalarında olanları O bilir. O’nun ilminden hiçbir şeyi —dilediği müstesna— kimse bilgisi içine sığdıramaz. O’nun kürsüsü gökleri ve yeri içine almıştır. Onları korumak kendisine zor gelmez. O yücedir, mutlak büyüktür.',
+    personalPrayerTemplate:
+      "Âyetel Kürsî’nin hürmetine Allah'ım; {isim} kardeşimize, muhterem anne ve babasına, eşine, evlatlarına ve bütün akrabalarına görünür görünmez her türlü kaza, bela ve şerden muhafaza; bedenlerine sıhhat, hânelerine huzur ve helal rızık ihsan eyle. Vefat etmiş yakınlarına rahmet ve mağfiret nasip eyle. Âmin.",
+    audioUrl: '/audio/duas/ayetel_kursi_2_255_aaqib_azeez_ccbysa4.mp3',
+    audioLicense: 'CC BY-SA 4.0 (Wikimedia Commons · Kendi Çalışması / Own Work)',
+    audioAttribution: 'Qari Aaqib Azeez (Wikimedia Commons, File:Throne_Verse_(Al-Baqara,_verse_255).mp3)',
+    audioSha256: 'cb32b4b36012fdc2c4a93460a7106b9e337f1244d5198a549cea76a7edeaeb38',
+    audioStatus: 'verified_ready',
+    isActive: true,
+    updatedAt: nowIso(),
+  },
+  {
+    id: 'high-dua-ihlas',
+    title: 'İhlâs Sûresi (112:1–4)',
+    sourceCitation:
+      'Kur’ân-ı Kerîm, İhlâs Sûresi 112:1–4 · Metin: Quran.com / Tanzil Uthmani · Meal: Diyanet İşleri Başkanlığı · Ses: Qari Aaqib Azeez (Wikimedia Commons, CC0 1.0)',
+    arabicHarekeli:
+      'بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ ۝ قُلْ هُوَ ٱللَّهُ أَحَدٌ ۝ ٱللَّهُ ٱلصَّمَدُ ۝ لَمْ يَلِدْ وَلَمْ يُولَدْ ۝ وَلَمْ يَكُن لَّهُۥ كُفُوًا أَحَدٌۢ',
+    turkishMeaning:
+      'İhlâs Sûresi’nin meali: Rahmân ve Rahîm olan Allah’ın adıyla. De ki: O, Allah’tır, bir tektir. Allah Samed’dir (Her şey O’na muhtaçtır; O hiçbir şeye muhtaç değildir). O’ndan çocuk olmamıştır; kendisi de doğmamıştır. Hiçbir şey O’na denk ve benzer değildir.',
+    personalPrayerTemplate:
+      "Okunan İhlâs-ı Şerîf’in nuru hürmetine Yüce Rabbim; {isim} kardeşimizin, anne ve babasının, ailesinin ve bütün akrabalarının kalplerini iman ve ihlâs ile sabit kıl; kendilerine iki cihanda afiyet, bereket ve hayırlı uzun ömürler ihsan eyle. Geçmişlerinin ruhlarını şad eyle. Âmin.",
+    audioUrl: '/audio/duas/ihlas_112_aaqib_azeez_cc0.mp3',
+    audioLicense: 'CC0 1.0 Public Domain Dedication',
+    audioAttribution:
+      "Qari Aaqib Azeez (Wikimedia Commons, File:Chapter_112,_Al-Ikhlas_(Mujawwad)_-_Recitation_of_the_Holy_Qur'an.mp3)",
+    audioSha256: 'bcf92fc3ff76170c1a5f12c94636d290f26386a382b58e102425407b71463c5b',
+    audioStatus: 'verified_ready',
+    isActive: true,
+    updatedAt: nowIso(),
+  },
+  {
+    id: 'high-dua-felak',
+    title: 'Felak Sûresi (113:1–5)',
+    sourceCitation:
+      'Kur’ân-ı Kerîm, Felak Sûresi 113:1–5 · Metin: Quran.com / Tanzil Uthmani · Meal: Diyanet İşleri Başkanlığı · Ses: Qari Aaqib Azeez (Wikimedia Commons, CC0 1.0)',
+    arabicHarekeli:
+      'بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ ۝ قُلْ أَعُوذُ بِرَبِّ ٱلْفَلَقِ ۝ مِن شَرِّ مَا خَلَقَ ۝ وَمِن شَرِّ غَاسِقٍ إِذَا وَقَبَ ۝ وَمِن شَرِّ ٱلنَّفَّـٰثَـٰتِ فِى ٱلْعُقَدِ ۝ وَمِن شَرِّ حَاسِدٍ إِذَا حَسَدَ',
+    turkishMeaning:
+      'Felak Sûresi’nin meali: Rahmân ve Rahîm olan Allah’ın adıyla. De ki: Yarattığı şeylerin kötülüğünden, karanlığı çöktüğü zaman gecenin kötülüğünden, düğümlere üfleyenlerin kötülüğünden ve haset ettiği zaman hasetçinin kötülüğünden, sabah aydınlığının Rabbine sığınırım.',
+    personalPrayerTemplate:
+      "Felak Sûresi’nin hürmetine Allah'ım; {isim} kardeşimizi, muhterem anne ve babasını, aile fertlerini ve bütün akrabalarını hasetçilerin şerrinden, nazar ve vesveseden muhafaza eyle; ömürlerine sağlık, kalplerine sekinet ve yuvalarına selamet ver. Âmin.",
+    audioUrl: '/audio/duas/felak_113_aaqib_azeez_cc0.mp3',
+    audioLicense: 'CC0 1.0 Public Domain Dedication',
+    audioAttribution:
+      "Qari Aaqib Azeez (Wikimedia Commons, File:Chapter_113,_Al-Falaq_(Murattal)_-_Recitation_of_the_Holy_Qur'an.mp3)",
+    audioSha256: '2e01e8048cca4ff3a7419331e119241d15565e1e5a531fab85bd53d7283afcc9',
+    audioStatus: 'verified_ready',
+    isActive: true,
+    updatedAt: nowIso(),
+  },
+  {
+    id: 'high-dua-nas',
+    title: 'Nâs Sûresi (114:1–6)',
+    sourceCitation:
+      'Kur’ân-ı Kerîm, Nâs Sûresi 114:1–6 · Metin: Quran.com / Tanzil Uthmani · Meal: Diyanet İşleri Başkanlığı · Ses: Qari Aaqib Azeez (Wikimedia Commons, CC0 1.0)',
+    arabicHarekeli:
+      'بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ ۝ قُلْ أَعُوذُ بِرَبِّ ٱلنَّاسِ ۝ مَلِكِ ٱلنَّاسِ ۝ إِلَـٰهِ ٱلنَّاسِ ۝ مِن شَرِّ ٱلْوَسْوَاسِ ٱلْخَنَّاسِ ۝ ٱلَّذِى يُوَسْوِسُ فِى صُدُورِ ٱلنَّاسِ ۝ مِنَ ٱلْجِنَّةِ وَٱلنَّاسِ',
+    turkishMeaning:
+      'Nâs Sûresi’nin meali: Rahmân ve Rahîm olan Allah’ın adıyla. De ki: Cinlerden ve insanlardan; insanların kalplerine vesvese veren sinsi vesvesecinin kötülüğünden, insanların Rabbine, insanların Melik’ine, insanların İlâh’ına sığınırım.',
+    personalPrayerTemplate:
+      "Nâs Sûresi’nin hürmetine Rabbimiz; {isim} kardeşimizin, anne ve babasının, sevdiklerinin ve bütün akrabalarının gönüllerine huzur ve ferahlık nasip eyle; her türlü manevi darlıktan, vesveseden ve üzüntüden muhafaza buyur. Âmin.",
+    audioUrl: '/audio/duas/nas_114_aaqib_azeez_cc0.mp3',
+    audioLicense: 'CC0 1.0 Public Domain Dedication',
+    audioAttribution:
+      "Qari Aaqib Azeez (Wikimedia Commons, File:Chapter_114,_Al-Nas_(Murattal)_-_Recitation_of_the_Holy_Qur'an.mp3)",
+    audioSha256: '176441a835915036e7b517f723d49d2954a86cfd8bfd12d6172c77edcc85405e',
+    audioStatus: 'verified_ready',
+    isActive: true,
+    updatedAt: nowIso(),
+  },
+  {
+    id: 'high-dua-kevser',
+    title: 'Kevser Sûresi (108:1–3)',
+    sourceCitation:
+      'Kur’ân-ı Kerîm, Kevser Sûresi 108:1–3 · Metin: Quran.com / Tanzil Uthmani · Meal: Diyanet İşleri Başkanlığı · Ses: Qari Aaqib Azeez (Wikimedia Commons, CC0 1.0)',
+    arabicHarekeli:
+      'بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ ۝ إِنَّآ أَعْطَيْنَـٰكَ ٱلْكَوْثَرَ ۝ فَصَلِّ لِرَبِّكَ وَٱنْحَرْ ۝ إِنَّ شَانِئَكَ هُوَ ٱلْأَبْتَرُ',
+    turkishMeaning:
+      'Kevser Sûresi’nin meali: Rahmân ve Rahîm olan Allah’ın adıyla. Şüphesiz Biz sana Kevser’i verdik. O hâlde Rabbin için namaz kıl ve kurban kes. Doğrusu sana kin besleyen kimsenin soyu kesiktir.',
+    personalPrayerTemplate:
+      "Kevser Sûresi’nin bereketiyle Yüce Allah'ım; {isim} kardeşimizin, muhterem anne ve babasının, ailesinin ve bütün akrabalarının rızıklarına bolluk, sofralarına bereket, ömürlerine hayır ve şükür dolu güzel günler ihsan eyle. Ahirette Kevser havuzundan içmeyi nasip eyle. Âmin.",
+    audioUrl: '/audio/duas/kevser_108_aaqib_azeez_cc0.mp3',
+    audioLicense: 'CC0 1.0 Public Domain Dedication',
+    audioAttribution:
+      "Qari Aaqib Azeez (Wikimedia Commons, File:Chapter_108,_Al-Kawthar_(Murattal)_-_Recitation_of_the_Holy_Qur'an.mp3)",
+    audioSha256: 'b973e5a7e4c582c95436187d99ea5bf315ef5c820a6d3114b81ab145519a86bb',
+    audioStatus: 'verified_ready',
+    isActive: true,
+    updatedAt: nowIso(),
+  },
+  {
+    id: 'high-dua-salati-tefriciye',
+    title: 'Salât-ı Tefriciye (Geleneksel Arapça Salavât ve Dua)',
+    sourceCitation:
+      'Geleneksel İslâm Dua ve Salavât Geleneği (Kur’ân-ı Kerîm ayeti değildir · Salât-ı Nâriye rivayeti) · Ses: Lisanslı Okuyucu Kaydı Bekleniyor',
+    arabicHarekeli:
+      'أَللّٰهُمَّ صَلِّ صَلَاةً كَامِلَةً وَسَلِّمْ سَلَامًا تَامًّا عَلَىٰ سَيِّدِنَا مُحَمَّدٍ ٱلَّذِي تَنْحَلُّ بِهِ ٱلْعُقَدُ وَتَنْفَرِجُ بِهِ ٱلْكُرَبُ وَتُقْضَىٰ بِهِ ٱلْحَوَائِجُ وَتُنَالُ بِهِ ٱلرَّغَائِبُ وَحُسْنُ ٱلْخَوَاتِمِ وَيُسْتَسْقَى ٱلْغَمَامُ بِوَجْهِهِ ٱلْكَرِيمِ وَعَلَىٰ آلِهِ وَصَحْبِهِ فِي كُلِّ لَمْحَةٍ وَنَفَسٍ بِعَدَدِ كُلِّ مَعْلُومٍ لَكَ',
+    turkishMeaning:
+      'Salât-ı Tefriciye (Kur’ân-ı Kerîm ayeti değildir; geleneksel Arapça salavât ve duadır): Allah’ım! Kendisi hürmetine düğümlerin çözüldüğü, sıkıntıların feraha erdiği, ihtiyaçların giderildiği, hayırlı arzulara ve güzel akıbete ulaşıldığı, kerîm yüzü hürmetine yağmurların indirildiği Efendimiz Muhammed’e, âline ve ashâbına her göz açıp kapamada ve her nefeste, Senin bildiğin bütün varlıklar adedince kâmil bir salât ve tam bir selâm eyle.',
+    personalPrayerTemplate:
+      "Bu mübarek salavât-ı şerîfe hürmetine Allah'ım; {isim} kardeşimizin, anne ve babasının, ailesinin ve bütün akrabalarının gönüllerindeki hayırlı muratları ihsan eyle; sıkıntılarını feraha, dertlerini şifaya, işlerini kolaylığa tebdil eyle. Geçmişlerine rahmet eyle. Âmin.",
+    audioUrl: '',
+    audioLicense: 'Doğrulanmamış / Lisanslı Okuyucu Kaydı Bekleniyor',
+    audioAttribution:
+      'Geçici Olarak Hazır Değil — Doğrulanmış ses kaydı eklendiğinde aktif olur (Kur’ân ayeti değil, geleneksel salavâttır).',
+    audioStatus: 'pending_license_verification',
+    isActive: true,
+    updatedAt: nowIso(),
+  },
 ];
+
+export const LEGACY_SCHOLAR_CAP_COLORS = ['#1E3A8A', '#1D4ED8'] as const;
 
 export const DEFAULT_GIFTS: GiftRule[] = [
   {
@@ -354,7 +475,7 @@ export const createDefaultAppState = (): AppState => ({
         name: 'Hacı Ahmet Efendi',
         title: 'Kıdemli Dua Hocası',
         bio: 'Sakin hitabeti, şifa ve bereket dualarıyla yayına eşlik eder.',
-        capColor: '#1E3A8A',
+        capColor: '#FFFFFF',
         jacketColor: '#101F42',
         beardStyle: 'full_white',
         hasSpectacles: true,
@@ -367,7 +488,7 @@ export const createDefaultAppState = (): AppState => ({
         name: 'Hacı Mehmet Efendi',
         title: 'İkinci Dua Hocası',
         bio: 'Diğer hoca dua okurken dinleyerek ve âmin diyerek eşlik eder.',
-        capColor: '#1D4ED8',
+        capColor: '#FFFFFF',
         jacketColor: '#13244C',
         beardStyle: 'trimmed_silver',
         hasSpectacles: false,
@@ -447,3 +568,76 @@ export const createDefaultAppState = (): AppState => ({
   },
   lastUpdatedAt: nowIso(),
 });
+
+const LEGACY_SCHOLAR_CAP_SET = new Set(
+  LEGACY_SCHOLAR_CAP_COLORS.map((c) => c.toUpperCase())
+);
+
+export function migrateScholarCapColor(capColor?: string): string {
+  const normalized = String(capColor || '').trim().toUpperCase();
+  if (!normalized || LEGACY_SCHOLAR_CAP_SET.has(normalized)) {
+    return '#FFFFFF';
+  }
+  return String(capColor).trim();
+}
+
+export function mergeScholarSettingsWithPureWhiteCaps(
+  savedScholars?: Partial<ScholarSettingsConfig> | null,
+  defaultScholars: ScholarSettingsConfig = createDefaultAppState().scholars
+): ScholarSettingsConfig {
+  const s1 = {
+    ...defaultScholars.profiles.scholar_1,
+    ...(savedScholars?.profiles?.scholar_1 || {}),
+  };
+  const s2 = {
+    ...defaultScholars.profiles.scholar_2,
+    ...(savedScholars?.profiles?.scholar_2 || {}),
+  };
+  return {
+    ...defaultScholars,
+    ...(savedScholars || {}),
+    profiles: {
+      scholar_1: { ...s1, capColor: migrateScholarCapColor(s1.capColor) },
+      scholar_2: { ...s2, capColor: migrateScholarCapColor(s2.capColor) },
+    },
+  };
+}
+
+export function mergeBuiltInHighTierDuas(
+  savedHighTier?: HighTierDuaEntry[] | null,
+  builtInHighTier: HighTierDuaEntry[] = DEFAULT_HIGH_TIER_DUAS
+): HighTierDuaEntry[] {
+  const base =
+    Array.isArray(savedHighTier) && savedHighTier.length > 0
+      ? savedHighTier.filter((entry) => Boolean(entry && entry.id))
+      : [];
+  if (base.length === 0) {
+    return builtInHighTier.map((d) => ({ ...d }));
+  }
+  const builtInById = new Map(builtInHighTier.map((d) => [d.id, d]));
+  const upgradedBase = base.map((entry) => {
+    const builtIn = builtInById.get(entry.id);
+    if (
+      builtIn &&
+      builtIn.audioStatus === 'verified_ready' &&
+      entry.audioStatus === 'pending_license_verification' &&
+      !String(entry.audioUrl || '').trim()
+    ) {
+      return {
+        ...entry,
+        sourceCitation: builtIn.sourceCitation,
+        audioUrl: builtIn.audioUrl,
+        audioLicense: builtIn.audioLicense,
+        audioAttribution: builtIn.audioAttribution,
+        audioSha256: builtIn.audioSha256,
+        audioStatus: builtIn.audioStatus,
+      };
+    }
+    return entry;
+  });
+  const existingIds = new Set(upgradedBase.map((d) => d.id));
+  const missingBuiltIns = builtInHighTier
+    .filter((d) => !existingIds.has(d.id))
+    .map((d) => ({ ...d }));
+  return [...upgradedBase, ...missingBuiltIns];
+}

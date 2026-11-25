@@ -182,40 +182,90 @@ export function createRelayServer(options = {}) {
     options.instanceId ||
     `rly_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
-  function classifyTikTokError(rawMessage) {
+  function extractRetryAfterSec(err, msg) {
+    const rawHeader =
+      err?.retryAfter ??
+      err?.response?.headers?.['retry-after'] ??
+      err?.headers?.['retry-after'];
+    const headerVal = Number(rawHeader);
+    if (Number.isFinite(headerVal) && headerVal > 0) {
+      return headerVal > 1000 ? Math.ceil(headerVal / 1000) : Math.ceil(headerVal);
+    }
+    if (typeof rawHeader === 'string' && rawHeader.trim()) {
+      const parsedDateMs = Date.parse(rawHeader.trim());
+      if (Number.isFinite(parsedDateMs)) {
+        const diffSec = Math.ceil((parsedDateMs - Date.now()) / 1000);
+        if (diffSec > 0) return Math.min(86_400, diffSec);
+      }
+    }
+    const match = String(msg || '').match(/retryAfterSec\s*[=:]\s*(\d+)/i);
+    if (match) {
+      return Math.max(5, Math.min(3600, Number(match[1])));
+    }
+    if (/rate_limit_account_day/i.test(String(msg || ''))) {
+      return 900;
+    }
+    return 90;
+  }
+
+  function classifyTikTokError(rawMessage, errObj = null) {
     const msg = String(rawMessage || '');
+    if (
+      errObj?.name === 'SignatureRateLimitError' ||
+      /rate[_\s-]*limit|rate_limit_account_day|too many connections|http\s*429|\[Rate Limited\]/i.test(msg)
+    ) {
+      const retryAfterSec = extractRetryAfterSec(errObj, msg);
+      return {
+        category: 'rate_limited',
+        retryAfterSec,
+        hint: `İmzalama kotası doldu (${retryAfterSec} sn bekleme). Günlük Euler kotasına takılmamak için harici imzalama sağlayıcısı (TIKTOK_SIGNER_PROVIDER / HTTP_SIGN_SERVER_URL / WS_SIGN_SERVER_URL) yapılandırın.`,
+      };
+    }
     if (/business\s*plan|enterprise|fetchWebcastSignatureFromEulerRoute/i.test(msg)) {
       return {
         category: 'euler_business_plan_required',
+        retryAfterSec: null,
         hint: 'EulerStream Business Plan kısıtı algılandı. Ücretli Business plan yerine harici imzalama servisi veya doğrudan gift/list rotası kullanılmalıdır.',
       };
     }
-    if (/fetchSignedWebSocketFromProvider|fetchWebcastSignatureFromProvider|Harici (?:WS|HTTP) imzalama|Empty Cookies|Empty Payload/i.test(msg)) {
+    if (/fetchSignedWebSocketFromProvider|fetchWebcastSignatureFromProvider|Harici (?:WS|HTTP) imzalama|Empty Cookies|Empty Payload|tiktok_signer/i.test(msg)) {
       return {
         category: 'custom_signer_error',
+        retryAfterSec: null,
         hint: 'İmzalama sağlayıcısı geçerli bir imza, protobuf yükü veya çerez döndürmedi.',
       };
     }
-    if (/sign\s*api|403|401|unauthorized|forbidden|captcha|rate\s*limit|euler/i.test(msg)) {
+    if (/sign\s*api|403|401|unauthorized|forbidden|captcha|euler/i.test(msg)) {
       return {
         category: 'euler_business_plan_required',
+        retryAfterSec: null,
         hint: 'İmzalama kotası/yetkisi veya erişim kısıtı algılandı.',
       };
     }
     if (/timed?\s*out|timeout|econnrefused|enotfound|fetch failed|cors|network|aborterror/i.test(msg)) {
       return {
         category: 'signer_cors_timeout',
+        retryAfterSec: null,
         hint: 'İmzalama/WebCast sunucusu zaman aşımı veya ağ erişim hatası.',
+      };
+    }
+    if (/invalid.*uniqueid|user.*not\s*found|404/i.test(msg)) {
+      return {
+        category: 'room_not_found',
+        retryAfterSec: null,
+        hint: 'Belirtilen TikTok kullanıcı adı veya canlı yayın odası bulunamadı.',
       };
     }
     if (/offline|not found|isn't\s+(?:live|online)|not\s+online|live.*ended|user.*offline|room.*not/i.test(msg)) {
       return {
         category: 'stream_offline',
+        retryAfterSec: null,
         hint: 'Yayın şu anda çevrimdışı veya canlı oda bulunamadı.',
       };
     }
     return {
       category: 'connection_error',
+      retryAfterSec: null,
       hint: '',
     };
   }
@@ -235,7 +285,12 @@ export function createRelayServer(options = {}) {
         processInitialData: false,
         enableExtendedGiftInfo: true,
       };
-      if (!activeSigner.disableEuler && serverEnv.SIGN_API_KEY && String(serverEnv.SIGN_API_KEY).trim()) {
+      if (
+        !activeSigner.disableEuler &&
+        !activeSigner.eulerFallbackDisabled &&
+        serverEnv.SIGN_API_KEY &&
+        String(serverEnv.SIGN_API_KEY).trim()
+      ) {
         connOptions.signApiKey = String(serverEnv.SIGN_API_KEY).trim();
       }
       return new ConnectionCtor(username, connOptions);
@@ -245,6 +300,16 @@ export function createRelayServer(options = {}) {
    * Active sessions keyed by lowercase public TikTok handle (no passwords or cookies).
    */
   const sessions = new Map();
+
+  function getSessionRetryAfterSec(session) {
+    if (!session?.cooldownUntilMs) return null;
+    const remMs = session.cooldownUntilMs - Date.now();
+    if (remMs <= 0) {
+      session.cooldownUntilMs = 0;
+      return null;
+    }
+    return Math.ceil(remMs / 1000);
+  }
 
   function getOrCreateSession(username) {
     const handle = sanitizeHandle(username) || defaultUsername;
@@ -260,6 +325,8 @@ export function createRelayServer(options = {}) {
         lastEvent: null,
         lastError: null,
         lastErrorCategory: null,
+        cooldownUntilMs: 0,
+        connectPromise: null,
         connection: null,
         clients: new Set(),
         nextSeq: 0,
@@ -272,6 +339,7 @@ export function createRelayServer(options = {}) {
         finalizedTransactions: new Map(),
         seenFollowKeys: new Map(),
         seenFollowMsgIds: new Map(),
+        seenChatMsgIds: new Map(),
       };
       sessions.set(handle, session);
     }
@@ -331,6 +399,7 @@ export function createRelayServer(options = {}) {
   }
 
   function broadcastStatus(session) {
+    const retryAfterSec = getSessionRetryAfterSec(session);
     return broadcastSse(session, 'status', {
       state: session.state,
       username: session.username,
@@ -339,7 +408,9 @@ export function createRelayServer(options = {}) {
       followerCount: session.followerCount,
       lastEvent: session.lastEvent,
       lastErrorCategory: session.lastErrorCategory,
+      retryAfterSec,
       error: session.lastError,
+      activeSignerProvider: signerSummary.activeSignerProvider,
       instanceId: session.instanceId,
       simulationEnabled,
       updatedAt: new Date().toISOString(),
@@ -699,22 +770,96 @@ export function createRelayServer(options = {}) {
     return { accepted: true, payload: emitted };
   }
 
+  function handleRawTikTokChat(session, data) {
+    const rawUserId = data?.userId ?? data?.user?.idStr ?? data?.user?.userId ?? data?.user?.id;
+    const userId =
+      rawUserId !== undefined && rawUserId !== null && String(rawUserId).trim()
+        ? sanitizeDisplayText(String(rawUserId), '')
+        : undefined;
+    const username = sanitizeDisplayText(
+      data?.uniqueId ||
+        data?.user?.displayId ||
+        data?.user?.uniqueId ||
+        data?.nickname ||
+        data?.user?.nickname,
+      'tiktok_izleyici'
+    );
+    const nickname = sanitizeDisplayText(
+      data?.nickname ||
+        data?.user?.nickname ||
+        data?.uniqueId ||
+        data?.user?.displayId ||
+        data?.user?.uniqueId,
+      username
+    );
+    const comment = sanitizeDisplayText(data?.comment ?? data?.message ?? data?.text, '');
+    if (!comment) {
+      return { accepted: false, reason: 'empty_comment' };
+    }
+    const msgId = data?.msgId ?? data?.common?.msgId;
+    const cleanMsgId = msgId ? sanitizeDisplayText(String(msgId), '') : undefined;
+    const nowMs = Date.now();
+    if (cleanMsgId && session.seenChatMsgIds?.has(cleanMsgId)) {
+      return { accepted: false, reason: 'duplicate_msg_id' };
+    }
+    if (cleanMsgId && session.seenChatMsgIds) {
+      session.seenChatMsgIds.set(cleanMsgId, nowMs);
+      pruneTimestampMap(session.seenChatMsgIds, 5000, 60 * 60 * 1000);
+    }
+
+    const payload = {
+      eventId: cleanMsgId || `cht_${nowMs}_${Math.random().toString(36).slice(2, 7)}`,
+      isSimulated: data?.isSimulated ? true : undefined,
+      userId,
+      username,
+      nickname,
+      comment,
+      msgId: cleanMsgId,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (!payload.isSimulated) {
+      session.lastEvent = {
+        kind: 'chat',
+        username: payload.username,
+        displayUsername: `@${payload.username}`,
+        summary: `Yorum: ${payload.comment}`,
+        timestamp: payload.timestamp,
+        eventId: payload.eventId,
+      };
+    }
+
+    const emitted = broadcastSse(session, 'chat', payload, { bufferable: true });
+    return { accepted: true, payload: emitted };
+  }
+
+  async function cleanupConnection(conn) {
+    if (!conn) return;
+    try {
+      conn.removeAllListeners?.();
+    } catch {
+      // ignore listener removal issues
+    }
+    try {
+      await conn.disconnect?.();
+    } catch {
+      // ignore close errors
+    }
+  }
+
   async function disconnectSession(session, opts = {}) {
     // Drop incomplete streaks safely without falsely marking them as repeatEnd: true
     clearPendingStreaks(session);
     if (opts.clearDedupeCaches) {
       session.seenFollowKeys.clear();
       session.seenFollowMsgIds.clear();
+      session.seenChatMsgIds?.clear();
     }
+    // Note: Never clear an active upstream 429 / Retry-After cooldown on disconnect or user request.
 
-    if (session.connection) {
-      try {
-        session.connection.disconnect();
-      } catch {
-        // ignore close errors
-      }
-      session.connection = null;
-    }
+    const oldConn = session.connection;
+    session.connection = null;
+    await cleanupConnection(oldConn);
 
     session.state = 'disconnected';
     session.roomId = null;
@@ -734,79 +879,98 @@ export function createRelayServer(options = {}) {
         username: session.username,
         roomId: session.roomId,
         viewerCount: session.viewerCount,
+        followerCount: session.followerCount,
+        lastEvent: session.lastEvent,
+        activeSignerProvider: signerSummary.activeSignerProvider,
         instanceId: session.instanceId,
       };
     }
 
-    await disconnectSession(session);
-    const connectStartSeq = session.nextSeq;
+    if (session.connectPromise) {
+      return session.connectPromise;
+    }
 
-    session.state = 'connecting';
-    session.lastError = null;
-    broadcastStatus(session);
-
-    let connection;
-    try {
-      connection = await connectionFactory(session.username);
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
+    const remainingRetrySec = getSessionRetryAfterSec(session);
+    if (remainingRetrySec && remainingRetrySec > 0) {
+      const cooldownMsg =
+        session.lastError ||
+        `@${session.username} için imzalama kotası bekleme süresi aktif (${remainingRetrySec} sn kaldı).`;
       session.state = 'error';
-      session.lastError = `tiktok-live-connector yüklenemedi: ${errMsg}`;
-      session.connection = null;
+      session.lastErrorCategory = session.lastErrorCategory || 'rate_limited';
+      session.lastError = cooldownMsg;
       broadcastStatus(session);
       return {
         ok: false,
         state: 'error',
         username: session.username,
-        error: session.lastError,
+        lastErrorCategory: session.lastErrorCategory,
+        retryAfterSec: remainingRetrySec,
+        cooldownUntil: new Date(session.cooldownUntilMs).toISOString(),
+        error: cooldownMsg,
       };
     }
-    session.connection = connection;
 
-    connection.on('gift', (event) => {
-      const user = event?.user || {};
-      const gift = event?.gift || {};
-      const giftDetails = event?.giftDetails || {};
-      handleRawTikTokGift(session, {
-        ...event,
-        userId: event?.userId ?? user.idStr ?? user.id ?? user.userId,
-        uniqueId: event?.uniqueId ?? user.displayId ?? user.uniqueId,
-        nickname: event?.nickname ?? user.nickname,
-        giftId: event?.giftId ?? gift.id ?? gift.gift_id ?? giftDetails.id,
-        giftName:
-          event?.giftName ??
-          gift.name ??
-          giftDetails.giftName ??
-          giftDetails.name ??
-          event?.extendedGiftInfo?.name,
-        giftType: event?.giftType ?? gift.type ?? giftDetails.giftType ?? giftDetails.type,
-        diamondCount: event?.diamondCount ?? gift.diamondCount ?? giftDetails.diamondCount,
-        repeatCount: event?.repeatCount,
-        repeatEnd: event?.repeatEnd === 1 || event?.repeatEnd === true,
-        groupId: event?.groupId,
-        transactionId: event?.transactionId,
-        msgId: event?.msgId ?? event?.common?.msgId,
-        extendedGiftInfo: event?.extendedGiftInfo,
-      });
-    });
+    const runConnect = async () => {
+      await disconnectSession(session);
+      const connectStartSeq = session.nextSeq;
 
-    connection.on('follow', (event) => {
-      const user = event?.user || {};
-      handleRawTikTokFollow(
-        session,
-        {
+      session.state = 'connecting';
+      session.lastError = null;
+      session.lastErrorCategory = null;
+      broadcastStatus(session);
+
+      let connection;
+      try {
+        connection = await connectionFactory(session.username);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const classified = classifyTikTokError(errMsg, err);
+        session.state = 'error';
+        session.lastErrorCategory = classified.category;
+        session.lastError = `tiktok-live-connector yüklenemedi: ${errMsg}`;
+        session.connection = null;
+        broadcastStatus(session);
+        return {
+          ok: false,
+          state: 'error',
+          username: session.username,
+          lastErrorCategory: classified.category,
+          retryAfterSec: classified.retryAfterSec,
+          error: session.lastError,
+        };
+      }
+      session.connection = connection;
+
+      connection.on('gift', (event) => {
+        if (session.connection !== connection) return;
+        const user = event?.user || {};
+        const gift = event?.gift || {};
+        const giftDetails = event?.giftDetails || {};
+        handleRawTikTokGift(session, {
           ...event,
           userId: event?.userId ?? user.idStr ?? user.id ?? user.userId,
           uniqueId: event?.uniqueId ?? user.displayId ?? user.uniqueId,
           nickname: event?.nickname ?? user.nickname,
+          giftId: event?.giftId ?? gift.id ?? gift.gift_id ?? giftDetails.id,
+          giftName:
+            event?.giftName ??
+            gift.name ??
+            giftDetails.giftName ??
+            giftDetails.name ??
+            event?.extendedGiftInfo?.name,
+          giftType: event?.giftType ?? gift.type ?? giftDetails.giftType ?? giftDetails.type,
+          diamondCount: event?.diamondCount ?? gift.diamondCount ?? giftDetails.diamondCount,
+          repeatCount: event?.repeatCount,
+          repeatEnd: event?.repeatEnd === 1 || event?.repeatEnd === true,
+          groupId: event?.groupId,
+          transactionId: event?.transactionId,
           msgId: event?.msgId ?? event?.common?.msgId,
-        },
-        'follow'
-      );
-    });
+          extendedGiftInfo: event?.extendedGiftInfo,
+        });
+      });
 
-    connection.on('social', (event) => {
-      if (isSocialFollowEvent(event)) {
+      connection.on('follow', (event) => {
+        if (session.connection !== connection) return;
         const user = event?.user || {};
         handleRawTikTokFollow(
           session,
@@ -817,94 +981,155 @@ export function createRelayServer(options = {}) {
             nickname: event?.nickname ?? user.nickname,
             msgId: event?.msgId ?? event?.common?.msgId,
           },
-          'social'
+          'follow'
         );
-      }
-    });
+      });
 
-    connection.on('roomUser', (event) => {
-      const viewerCount = Number(event?.total ?? event?.totalUser ?? event?.viewerCount);
-      if (Number.isFinite(viewerCount) && viewerCount >= 0) {
-        session.viewerCount = viewerCount;
-        broadcastStatus(session);
-      }
-    });
+      connection.on('social', (event) => {
+        if (session.connection !== connection) return;
+        if (isSocialFollowEvent(event)) {
+          const user = event?.user || {};
+          handleRawTikTokFollow(
+            session,
+            {
+              ...event,
+              userId: event?.userId ?? user.idStr ?? user.id ?? user.userId,
+              uniqueId: event?.uniqueId ?? user.displayId ?? user.uniqueId,
+              nickname: event?.nickname ?? user.nickname,
+              msgId: event?.msgId ?? event?.common?.msgId,
+            },
+            'social'
+          );
+        }
+      });
 
-    connection.on('streamEnd', () => {
-      clearPendingStreaks(session);
-      session.state = 'disconnected';
-      session.lastErrorCategory = 'stream_offline';
-      session.lastError = `TikTok canlı yayını sona erdi (@${session.username}).`;
-      session.roomId = null;
-      session.viewerCount = null;
-      session.connection = null;
-      broadcastStatus(session);
-    });
+      connection.on('chat', (event) => {
+        if (session.connection !== connection) return;
+        const user = event?.user || {};
+        handleRawTikTokChat(session, {
+          ...event,
+          userId: event?.userId ?? user.idStr ?? user.id ?? user.userId,
+          uniqueId: event?.uniqueId ?? user.displayId ?? user.uniqueId,
+          nickname: event?.nickname ?? user.nickname,
+          comment: event?.comment ?? event?.message ?? event?.text,
+          msgId: event?.msgId ?? event?.common?.msgId,
+        });
+      });
 
-    connection.on('disconnected', () => {
-      clearPendingStreaks(session);
-      if (session.state === 'connected') {
+      connection.on('roomUser', (event) => {
+        if (session.connection !== connection) return;
+        const viewerCount = Number(event?.total ?? event?.totalUser ?? event?.viewerCount);
+        if (Number.isFinite(viewerCount) && viewerCount >= 0) {
+          session.viewerCount = viewerCount;
+          broadcastStatus(session);
+        }
+      });
+
+      connection.on('streamEnd', () => {
+        if (session.connection !== connection) return;
+        clearPendingStreaks(session);
         session.state = 'disconnected';
-        session.lastErrorCategory = 'disconnected';
-        session.lastError = 'TikTok WebCast akışı kesildi.';
+        session.lastErrorCategory = 'stream_offline';
+        session.lastError = `TikTok canlı yayını sona erdi (@${session.username}).`;
         session.roomId = null;
         session.viewerCount = null;
         session.connection = null;
+        void cleanupConnection(connection);
         broadcastStatus(session);
+      });
+
+      connection.on('disconnected', () => {
+        if (session.connection !== connection) return;
+        clearPendingStreaks(session);
+        if (session.state === 'connected') {
+          session.state = 'disconnected';
+          session.lastErrorCategory = 'disconnected';
+          session.lastError = 'TikTok WebCast akışı kesildi.';
+          session.roomId = null;
+          session.viewerCount = null;
+          session.connection = null;
+          void cleanupConnection(connection);
+          broadcastStatus(session);
+        }
+      });
+
+      connection.on('error', (err) => {
+        if (session.connection !== connection) return;
+        const raw = err?.message || 'TikTok WebCast hata bildirdi.';
+        const classified = classifyTikTokError(raw, err);
+        session.lastErrorCategory = classified.category;
+        if (classified.retryAfterSec) {
+          session.cooldownUntilMs = Date.now() + classified.retryAfterSec * 1000;
+        }
+        session.lastError = classified.hint ? `${raw} (${classified.hint})` : raw;
+        broadcastStatus(session);
+      });
+
+      try {
+        const roomState = await connection.connect();
+        session.state = 'connected';
+        session.cooldownUntilMs = 0;
+        session.roomId = roomState?.roomId ? String(roomState.roomId) : null;
+        const initialViewerCount = Number(
+          roomState?.roomInfo?.user_count ?? roomState?.roomInfo?.userCount
+        );
+        session.viewerCount = Number.isFinite(initialViewerCount) ? initialViewerCount : null;
+        session.lastError = null;
+        session.lastErrorCategory = null;
+        broadcastStatus(session);
+        return {
+          ok: true,
+          state: 'connected',
+          username: session.username,
+          roomId: session.roomId,
+          viewerCount: session.viewerCount,
+          followerCount: session.followerCount,
+          lastEvent: session.lastEvent,
+          activeSignerProvider: signerSummary.activeSignerProvider,
+          instanceId: session.instanceId,
+          initialEventCursor: `${session.instanceId}:${connectStartSeq}`,
+        };
+      } catch (err) {
+        clearPendingStreaks(session);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const classified = classifyTikTokError(errMsg, err);
+        session.state =
+          classified.category === 'stream_offline' || classified.category === 'room_not_found'
+            ? 'disconnected'
+            : 'error';
+        session.roomId = null;
+        session.viewerCount = null;
+        session.connection = null;
+        await cleanupConnection(connection);
+        session.lastErrorCategory = classified.category;
+        if (classified.retryAfterSec) {
+          session.cooldownUntilMs = Date.now() + classified.retryAfterSec * 1000;
+        }
+        session.lastError = classified.hint
+          ? `@${session.username} yayınına bağlanılamadı: ${errMsg} — ${classified.hint}`
+          : `@${session.username} yayınına bağlanılamadı: ${errMsg}`;
+        broadcastStatus(session);
+        return {
+          ok: false,
+          state: session.state,
+          username: session.username,
+          lastErrorCategory: session.lastErrorCategory,
+          retryAfterSec: classified.retryAfterSec,
+          cooldownUntil: session.cooldownUntilMs
+            ? new Date(session.cooldownUntilMs).toISOString()
+            : null,
+          error: session.lastError,
+        };
+      }
+    };
+
+    const connectPromise = runConnect().finally(() => {
+      if (session.connectPromise === connectPromise) {
+        session.connectPromise = null;
       }
     });
-
-    connection.on('error', (err) => {
-      const raw = err?.message || 'TikTok WebCast hata bildirdi.';
-      const classified = classifyTikTokError(raw);
-      session.lastErrorCategory = classified.category;
-      session.lastError = classified.hint ? `${raw} (${classified.hint})` : raw;
-      broadcastStatus(session);
-    });
-
-    try {
-      const roomState = await connection.connect();
-      session.state = 'connected';
-      session.roomId = roomState?.roomId ? String(roomState.roomId) : null;
-      const initialViewerCount = Number(
-        roomState?.roomInfo?.user_count ?? roomState?.roomInfo?.userCount
-      );
-      session.viewerCount = Number.isFinite(initialViewerCount) ? initialViewerCount : null;
-      session.lastError = null;
-      session.lastErrorCategory = null;
-      broadcastStatus(session);
-      return {
-        ok: true,
-        state: 'connected',
-        username: session.username,
-        roomId: session.roomId,
-        viewerCount: session.viewerCount,
-        followerCount: session.followerCount,
-        lastEvent: session.lastEvent,
-        instanceId: session.instanceId,
-        initialEventCursor: `${session.instanceId}:${connectStartSeq}`,
-      };
-    } catch (err) {
-      clearPendingStreaks(session);
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const classified = classifyTikTokError(errMsg);
-      session.state = classified.category === 'stream_offline' ? 'disconnected' : 'error';
-      session.roomId = null;
-      session.viewerCount = null;
-      session.connection = null;
-      session.lastErrorCategory = classified.category;
-      session.lastError = classified.hint
-        ? `@${session.username} yayınına bağlanılamadı: ${errMsg} — ${classified.hint}`
-        : `@${session.username} yayınına bağlanılamadı: ${errMsg}`;
-      broadcastStatus(session);
-      return {
-        ok: false,
-        state: session.state,
-        username: session.username,
-        lastErrorCategory: session.lastErrorCategory,
-        error: session.lastError,
-      };
-    }
+    session.connectPromise = connectPromise;
+    return connectPromise;
   }
 
   function pickRandomSimSender(explicitSender) {
@@ -939,6 +1164,23 @@ export function createRelayServer(options = {}) {
       );
       return {
         scenario: 'follower',
+        emittedCount: res.accepted ? 1 : 0,
+        bufferedCount: 0,
+        events: res.payload ? [res.payload] : [],
+      };
+    }
+
+    if (scenario === 'chat' || scenario === 'comment') {
+      const res = handleRawTikTokChat(session, {
+        isSimulated: true,
+        userId: simUid,
+        uniqueId: sender,
+        nickname: sender,
+        comment: body?.comment || 'Selamün aleyküm, hayırlı yayınlar.',
+        msgId: `sim_cht_${now}_${Math.random().toString(36).slice(2, 6)}`,
+      });
+      return {
+        scenario: 'chat',
         emittedCount: res.accepted ? 1 : 0,
         bufferedCount: 0,
         events: res.payload ? [res.payload] : [],
@@ -1074,6 +1316,15 @@ export function createRelayServer(options = {}) {
         'GET /events',
       ];
       if (simulationEnabled) endpoints.push('POST /simulate');
+      const sessionsSummary = Array.from(sessions.values()).map((s) => ({
+        username: s.username,
+        state: s.state,
+        roomId: s.roomId,
+        viewerCount: s.viewerCount,
+        followerCount: s.followerCount,
+        lastErrorCategory: s.lastErrorCategory,
+        retryAfterSec: getSessionRetryAfterSec(s),
+      }));
       sendJson(res, 200, {
         ok: true,
         service: 'nur-i-dua-tiktok-relay',
@@ -1081,8 +1332,11 @@ export function createRelayServer(options = {}) {
         instanceId: relayInstanceId,
         defaultUsername,
         connectedSessions: active,
+        sessionsSummary,
         ringBufferSize,
         simulationEnabled,
+        activeSignerProvider: signerSummary.activeSignerProvider,
+        requestedSignerProvider: signerSummary.requestedProvider,
         signerMode: signerSummary.signerMode,
         hasSignApiKey: signerSummary.hasSignApiKey,
         hasSignServerUrl: signerSummary.hasSignServerUrl,
@@ -1109,11 +1363,18 @@ export function createRelayServer(options = {}) {
         lastEvent: session ? session.lastEvent : null,
         lastError: session ? session.lastError : null,
         lastErrorCategory: session ? session.lastErrorCategory : null,
+        retryAfterSec: session ? getSessionRetryAfterSec(session) : null,
+        cooldownUntil: session?.cooldownUntilMs
+          ? new Date(session.cooldownUntilMs).toISOString()
+          : null,
         instanceId: relayInstanceId,
         simulationEnabled,
+        activeSignerProvider: signerSummary.activeSignerProvider,
+        requestedSignerProvider: signerSummary.requestedProvider,
         signerMode: signerSummary.signerMode,
         hasCustomWsSigner: signerSummary.hasCustomWsSigner,
         hasCustomHttpSigner: signerSummary.hasCustomHttpSigner,
+        eulerFallbackDisabled: signerSummary.eulerFallbackDisabled,
         eulerBusinessEndpointBlocked: signerSummary.eulerBusinessEndpointBlocked,
         connectorVersion: '2.5.0',
         updatedAt: new Date().toISOString(),
@@ -1134,7 +1395,15 @@ export function createRelayServer(options = {}) {
         const body = await readJsonBody(req);
         const target = sanitizeHandle(body.username || defaultUsername) || defaultUsername;
         const result = await connectSession(target);
-        sendJson(res, result.ok ? 200 : 502, result);
+        const statusCode = result.ok
+          ? 200
+          : result.lastErrorCategory === 'rate_limited'
+          ? 429
+          : 502;
+        if (!result.ok && result.retryAfterSec) {
+          res.setHeader('Retry-After', String(result.retryAfterSec));
+        }
+        sendJson(res, statusCode, result);
       } catch (err) {
         sendJson(res, 400, {
           ok: false,
@@ -1158,11 +1427,28 @@ export function createRelayServer(options = {}) {
         const body = await readJsonBody(req);
         const target = sanitizeHandle(body.username || defaultUsername) || defaultUsername;
         const session = sessions.get(target);
+        const activeRetryAfter = session ? getSessionRetryAfterSec(session) : null;
+        if (activeRetryAfter && activeRetryAfter > 0) {
+          const result = await connectSession(target);
+          if (result.retryAfterSec) {
+            res.setHeader('Retry-After', String(result.retryAfterSec));
+          }
+          sendJson(res, 429, result);
+          return;
+        }
         if (session) {
           await disconnectSession(session);
         }
         const result = await connectSession(target);
-        sendJson(res, result.ok ? 200 : 502, result);
+        const statusCode = result.ok
+          ? 200
+          : result.lastErrorCategory === 'rate_limited'
+          ? 429
+          : 502;
+        if (!result.ok && result.retryAfterSec) {
+          res.setHeader('Retry-After', String(result.retryAfterSec));
+        }
+        sendJson(res, statusCode, result);
       } catch (err) {
         sendJson(res, 400, {
           ok: false,
@@ -1359,6 +1645,7 @@ export function createRelayServer(options = {}) {
     disconnectSession,
     handleRawTikTokGift,
     handleRawTikTokFollow,
+    handleRawTikTokChat,
     shutdown,
   };
 }

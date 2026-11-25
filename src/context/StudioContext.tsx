@@ -5,6 +5,8 @@ import {
   DEFAULT_TIER_RULES,
   DEFAULT_YASIN_RECITATION,
   LEGACY_DEFAULT_TIER_THRESHOLDS,
+  mergeBuiltInHighTierDuas,
+  mergeScholarSettingsWithPureWhiteCaps,
   PRAYER_CATEGORIES,
   SAMPLE_TIKTOK_USERNAMES,
 } from '../data/defaults';
@@ -186,7 +188,14 @@ interface StudioContextValue {
     service?: string;
     connectorVersion?: string;
     simulationEnabled?: boolean;
+    activeSignerProvider?: string;
+    requestedSignerProvider?: string;
+    signerMode?: string;
     hasSignApiKey?: boolean;
+    hasCustomWsSigner?: boolean;
+    hasCustomHttpSigner?: boolean;
+    eulerFallbackDisabled?: boolean;
+    eulerBusinessEndpointBlocked?: boolean;
     endpoints?: string[];
     error?: string;
   }>;
@@ -390,10 +399,7 @@ function recoverInitialState(): AppState {
     ? savedPrayers
     : [...DEFAULT_MID_OPENING_PRAYERS, ...savedPrayers];
 
-  const savedHighTier =
-    Array.isArray(saved.highTierDuas) && saved.highTierDuas.length > 0
-      ? saved.highTierDuas
-      : defaults.highTierDuas;
+  const mergedHighTier = mergeBuiltInHighTierDuas(saved.highTierDuas, defaults.highTierDuas);
 
   const savedYasin = saved.yasinRecitation;
   const shouldResetDefaultYasin =
@@ -415,18 +421,11 @@ function recoverInitialState(): AppState {
     prayers: mergedPrayers,
     gifts: Array.isArray(saved.gifts) && saved.gifts.length > 0 ? saved.gifts : defaults.gifts,
     tierRules: resolveTierRules(migrateLegacyTierRules(saved.tierRules)),
-    highTierDuas: savedHighTier,
+    highTierDuas: mergedHighTier,
     yasinRecitation: mergedYasin,
     queue: recoveredQueue,
     history: uniqueHistory,
-    scholars: {
-      ...defaults.scholars,
-      ...(saved.scholars || {}),
-      profiles: {
-        scholar_1: { ...defaults.scholars.profiles.scholar_1, ...(saved.scholars?.profiles?.scholar_1 || {}) },
-        scholar_2: { ...defaults.scholars.profiles.scholar_2, ...(saved.scholars?.profiles?.scholar_2 || {}) },
-      },
-    },
+    scholars: mergeScholarSettingsWithPureWhiteCaps(saved.scholars, defaults.scholars),
     voice: {
       ...defaults.voice,
       ...(saved.voice || {}),
@@ -730,6 +729,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           ...prev,
           ...res.appState,
           tierRules: resolveTierRules(migrateLegacyTierRules(res.appState?.tierRules)),
+          highTierDuas: mergeBuiltInHighTierDuas(res.appState?.highTierDuas),
+          scholars: mergeScholarSettingsWithPureWhiteCaps(res.appState?.scholars, prev.scholars),
         }));
       }
       if (isBroadcastView && res.livePlayback) {
@@ -759,6 +760,8 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           setState({
             ...incoming,
             tierRules: resolveTierRules(migrateLegacyTierRules(incoming?.tierRules)),
+            highTierDuas: mergeBuiltInHighTierDuas(incoming?.highTierDuas),
+            scholars: mergeScholarSettingsWithPureWhiteCaps(incoming?.scholars),
           });
         }
       },
@@ -2391,6 +2394,29 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
           externalDedupeKey: follow.dedupeKey || follow.eventId,
         });
       },
+      onChatEvent: (chat: {
+        isSimulated?: boolean;
+        username: string;
+        comment: string;
+        timestamp: string;
+        eventId: string;
+      }) => {
+        if (chat.isSimulated) return;
+        setState((prev) => ({
+          ...prev,
+          tiktok: {
+            ...prev.tiktok,
+            lastEvent: {
+              kind: 'chat',
+              username: chat.username,
+              displayUsername: `@${chat.username}`,
+              summary: `Yorum: ${chat.comment}`,
+              timestamp: chat.timestamp,
+              eventId: chat.eventId,
+            },
+          },
+        }));
+      },
       onLog: (level: 'info' | 'warning' | 'error', message: string) => {
         appendLog(level, 'tiktok', message);
       },
@@ -2669,6 +2695,9 @@ export const StudioProvider: React.FC<{ children: React.ReactNode; isBroadcastVi
         setState({
           ...defaults,
           ...parsed,
+          tierRules: resolveTierRules(migrateLegacyTierRules(parsed.tierRules)),
+          highTierDuas: mergeBuiltInHighTierDuas(parsed.highTierDuas, defaults.highTierDuas),
+          scholars: mergeScholarSettingsWithPureWhiteCaps(parsed.scholars, defaults.scholars),
           yasinRecitation: shouldResetImportedYasin
             ? { ...DEFAULT_YASIN_RECITATION }
             : {

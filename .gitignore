@@ -1,8 +1,31 @@
+# Dependencies
 node_modules/
+
+# Build & Generated outputs
 build/
 dist/
 coverage/
+
+# OS & Temp files
 .DS_Store
 *.log
-.env*
+*.tmp
+*.bak
+
+# Environment & Secrets (keep template .env.example files only)
+.env
+.env.*
 !.env.example
+!relay-server/.env.example
+*.pem
+*.key
+*.p12
+*.jks
+*.keystore
+*service-account*.json
+credentials*.json
+google-services.json
+
+# Local runtime state & workspace artifacts
+.nur-i-dua-state.json
+.aistudio/

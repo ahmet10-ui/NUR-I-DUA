@@ -625,6 +625,9 @@ export const PrayersPage: React.FC = () => {
                   {entry.audioAttribution && (
                     <p className="text-[11px] text-slate-400">
                       Ses Kaynağı &amp; Lisans: {entry.audioAttribution}
+                      {!isVerified
+                        ? ' · Canlı yayında sahte Arapça okuma yapılmaz; yalnızca kişiselleştirilmiş Türkçe aile duası okunur.'
+                        : ''}
                     </p>
                   )}
 

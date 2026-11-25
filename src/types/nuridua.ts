@@ -215,7 +215,7 @@ export type TikTokConnectionState =
   | 'error';
 
 export interface TikTokLastEventSummary {
-  kind: 'gift' | 'follow' | 'status' | 'error';
+  kind: 'gift' | 'follow' | 'chat' | 'status' | 'error';
   username?: string;
   displayUsername?: string;
   summary: string;
@@ -279,6 +279,19 @@ export interface TikTokRelayFollowPayload {
   timestamp: string;
 }
 
+export interface TikTokRelayChatPayload {
+  eventId: string;
+  sseEventId?: string;
+  isSimulated?: boolean;
+  replayed?: boolean;
+  userId?: string;
+  username: string;
+  nickname?: string;
+  comment: string;
+  msgId?: string;
+  timestamp: string;
+}
+
 export interface TikTokRecoveryGapInfo {
   reason: 'relay_restarted' | 'buffer_evicted' | 'sequence_mismatch';
   message: string;
@@ -300,6 +313,8 @@ export interface TikTokConnectorStatusPayload {
   followerCount?: number | null;
   lastEvent?: TikTokLastEventSummary | null;
   lastErrorCategory?: string | null;
+  retryAfterSec?: number | null;
+  activeSignerProvider?: string | null;
   error?: string | null;
   sseEventId?: string;
   instanceId?: string;

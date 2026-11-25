@@ -899,8 +899,10 @@ test('13 & 14c. Existing long takdim, thank-you/ithaf & Stage 1/2 texts preserve
   assert.equal(isSupportedYasinAudioFormat('/audio/duas/yasin.txt'), false);
   assert.ok(buildMissingYasinAudioMessage(DEFAULT_YASIN_RECITATION).includes('.mp3'));
 
-  // Stage 2 existing high-tier & mid-tier pools preserved untouched
-  assert.equal(DEFAULT_HIGH_TIER_DUAS.length, 2);
+  // Stage 2 existing high-tier & mid-tier pools preserved (high-tier expanded from 2 to 8 with originals preserved)
+  assert.equal(DEFAULT_HIGH_TIER_DUAS.length, 8);
+  assert.equal(DEFAULT_HIGH_TIER_DUAS[0].id, 'high-dua-amenerrasulu');
+  assert.equal(DEFAULT_HIGH_TIER_DUAS[1].id, 'high-dua-fatiha');
   assert.equal(DEFAULT_MID_OPENING_PRAYERS.length, 5);
 });
 

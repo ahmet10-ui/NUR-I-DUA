@@ -58,10 +58,13 @@ export const TikTokPage: React.FC = () => {
     service?: string;
     connectorVersion?: string;
     simulationEnabled?: boolean;
+    activeSignerProvider?: string;
+    requestedSignerProvider?: string;
     signerMode?: string;
     hasSignApiKey?: boolean;
     hasCustomWsSigner?: boolean;
     hasCustomHttpSigner?: boolean;
+    eulerFallbackDisabled?: boolean;
     eulerBusinessEndpointBlocked?: boolean;
     endpoints?: string[];
     error?: string;
@@ -160,8 +163,10 @@ export const TikTokPage: React.FC = () => {
             HTTPS + SSE ile bağlanır. Relay URL girilmediğinde durum açıkça <strong>Not Configured</strong> olarak kalır.
           </p>
           <p className="text-amber-200/90">
-            3. Parti Kütüphane Uyarısı: <code className="font-mono text-slate-100">tiktok-live-connector</code> resmi olmayan WebCast protokolüne ve yoğun trafikte{' '}
-            <code className="font-mono text-slate-100">SIGN_API_KEY</code> (EulerStream) / <code className="font-mono text-slate-100">SIGN_SERVER_URL</code> servisine bağlıdır.
+            İmzalama Mimarisi: <code className="font-mono text-slate-100">TIKTOK_SIGNER_PROVIDER</code> ile{' '}
+            <code className="font-mono text-slate-100">nglmercer/tiktok-signer</code> veya özel HTTP/WS imzalama
+            servisine bağlanabilirsiniz; EulerStream günlük kotası (<code className="font-mono text-slate-100">rate_limit_account_day</code>)
+            ve ücretli Business ucu tetiklenmez.
           </p>
           {tiktok.connectionState === 'connected' && (
             <p className="text-emerald-300 font-mono-tabular">
@@ -357,9 +362,10 @@ export const TikTokPage: React.FC = () => {
               </div>
               {healthResult.ok ? (
                 <p className="text-[11px] text-emerald-100/90 font-mono">
-                  v{healthResult.connectorVersion || '2.5.0'} · Simulation:{' '}
-                  {String(Boolean(healthResult.simulationEnabled))} · Signer:{' '}
-                  {healthResult.signerMode || 'default'}
+                  v{healthResult.connectorVersion || '2.5.0'} · Provider:{' '}
+                  {healthResult.activeSignerProvider || 'euler'} ({healthResult.signerMode || 'default'}) · Euler Fallback:{' '}
+                  {healthResult.eulerFallbackDisabled ? 'Disabled' : 'Allowed'} · Simulation:{' '}
+                  {String(Boolean(healthResult.simulationEnabled))}
                 </p>
               ) : (
                 <p className="text-[11px]">{healthResult.error}</p>

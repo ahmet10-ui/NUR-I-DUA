@@ -5,6 +5,7 @@ import {
   TikTokConnectorStatusPayload,
   TikTokLastEventSummary,
   TikTokRecoveryGapInfo,
+  TikTokRelayChatPayload,
   TikTokRelayFollowPayload,
   TikTokRelayGiftPayload,
 } from '../types/nuridua';
@@ -14,6 +15,7 @@ export interface TikTokConnectorCallbacks {
   onStatusChange?: (payload: TikTokConnectorStatusPayload) => void;
   onFinalizedGift?: (gift: TikTokRelayGiftPayload) => void;
   onFollowEvent?: (follow: TikTokRelayFollowPayload) => void;
+  onChatEvent?: (chat: TikTokRelayChatPayload) => void;
   onRecoveryGap?: (gap: TikTokRecoveryGapInfo) => void;
   onLog?: (level: 'info' | 'warning' | 'error', message: string) => void;
 }
@@ -25,6 +27,7 @@ export interface TikTokServiceOptions {
   maxBackoffMs?: number;
   connectTimeoutMs?: number;
   disconnectTimeoutMs?: number;
+  rng?: () => number;
 }
 
 export interface RawGiftInput extends Partial<TikTokRelayGiftPayload> {
@@ -48,6 +51,19 @@ export interface RawGiftInput extends Partial<TikTokRelayGiftPayload> {
 
 export interface RawFollowInput extends Partial<TikTokRelayFollowPayload> {
   uniqueId?: string;
+  user?: {
+    id?: string | number;
+    displayId?: string;
+    uniqueId?: string;
+    nickname?: string;
+    userId?: string | number;
+  };
+}
+
+export interface RawChatInput extends Partial<TikTokRelayChatPayload> {
+  uniqueId?: string;
+  message?: string;
+  text?: string;
   user?: {
     id?: string | number;
     displayId?: string;
@@ -164,7 +180,7 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
 
   private config: TikTokConnectionConfig;
   private callbacks: TikTokConnectorCallbacks;
-  private options: Required<TikTokServiceOptions>;
+  private options: Required<Omit<TikTokServiceOptions, 'rng'>> & { rng: () => number };
   private status: TikTokConnectionState = 'unconfigured';
   private roomId: string | null = null;
   private viewerCount: number | null = null;
@@ -179,6 +195,9 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
   private activeHandle = '';
   private hadConnectedSession = false;
   private lastError: string | null = null;
+  private lastErrorCategory: string | null = null;
+  private lastRetryAfterSec: number | null = null;
+  private activeSignerProvider: string | null = null;
   private lastEventIds = new Map<string, string>();
 
   // Streak aggregation & idempotent duplicate protection
@@ -190,6 +209,7 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
   private seenSseEventIds = new Map<string, number>();
   private seenFollowKeys = new Map<string, number>();
   private seenFollowEventIds = new Map<string, number>();
+  private seenChatEventIds = new Map<string, number>();
   private localStreakSeq = 0;
 
   constructor(
@@ -206,6 +226,7 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
       maxBackoffMs: Math.max(1000, options.maxBackoffMs ?? 60_000),
       connectTimeoutMs: Math.max(1000, options.connectTimeoutMs ?? 45_000),
       disconnectTimeoutMs: Math.max(500, options.disconnectTimeoutMs ?? 8_000),
+      rng: typeof options.rng === 'function' ? options.rng : Math.random,
     };
     this.status = this.isConfigured ? 'disconnected' : 'unconfigured';
   }
@@ -282,6 +303,9 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
       viewerCount: this.viewerCount,
       followerCount: this.followerCount,
       lastEvent: this.lastEvent,
+      lastErrorCategory: this.lastErrorCategory,
+      retryAfterSec: this.lastRetryAfterSec,
+      activeSignerProvider: this.activeSignerProvider,
       error: this.lastError,
       updatedAt: new Date().toISOString(),
     };
@@ -313,6 +337,9 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
       viewerCount?: number | null;
       followerCount?: number | null;
       lastEvent?: TikTokLastEventSummary | null;
+      lastErrorCategory?: string | null;
+      retryAfterSec?: number | null;
+      activeSignerProvider?: string | null;
     }
   ): void {
     this.status = nextState;
@@ -321,6 +348,13 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     if (meta?.viewerCount !== undefined) this.viewerCount = meta.viewerCount;
     if (meta?.followerCount !== undefined) this.followerCount = meta.followerCount;
     if (meta?.lastEvent !== undefined) this.lastEvent = meta.lastEvent;
+    if (meta?.lastErrorCategory !== undefined) this.lastErrorCategory = meta.lastErrorCategory;
+    else if (nextState === 'connected') this.lastErrorCategory = null;
+    if (meta?.retryAfterSec !== undefined) this.lastRetryAfterSec = meta.retryAfterSec;
+    else if (nextState === 'connected') this.lastRetryAfterSec = null;
+    if (meta?.activeSignerProvider !== undefined) {
+      this.activeSignerProvider = meta.activeSignerProvider;
+    }
 
     this.callbacks.onStatusChange?.({
       state: nextState,
@@ -329,6 +363,9 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
       viewerCount: this.viewerCount,
       followerCount: this.followerCount,
       lastEvent: this.lastEvent,
+      lastErrorCategory: this.lastErrorCategory,
+      retryAfterSec: this.lastRetryAfterSec,
+      activeSignerProvider: this.activeSignerProvider,
       error,
       updatedAt: new Date().toISOString(),
     });
@@ -501,6 +538,76 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
 
     this.callbacks.onFollowEvent?.(normalized);
     return { accepted: true, follow: normalized };
+  }
+
+  ingestRawChatEvent(raw: RawChatInput): {
+    accepted: boolean;
+    chat?: TikTokRelayChatPayload;
+  } {
+    const cleanSseId = raw.sseEventId ? String(raw.sseEventId).trim() : '';
+    if (cleanSseId && this.markSseEventSeen(cleanSseId)) {
+      return { accepted: false };
+    }
+    const cleanComment = String(raw.comment ?? raw.message ?? raw.text ?? '')
+      .replace(/[\u0000-\u001F\u007F<>]/g, '')
+      .trim()
+      .slice(0, 120);
+    if (!cleanComment) {
+      return { accepted: false };
+    }
+    const cleanUser = sanitizeUsername(
+      raw.username ||
+        raw.uniqueId ||
+        raw.user?.displayId ||
+        raw.user?.uniqueId ||
+        raw.nickname ||
+        raw.user?.nickname ||
+        'tiktok_izleyici'
+    );
+    const rawUid = raw.userId ?? raw.user?.id ?? raw.user?.userId;
+    const cleanUserId =
+      rawUid !== undefined && rawUid !== null && String(rawUid).trim()
+        ? String(rawUid).trim().slice(0, 64)
+        : undefined;
+    const cleanMsgId =
+      raw.msgId !== undefined && raw.msgId !== null && String(raw.msgId).trim()
+        ? String(raw.msgId).trim().slice(0, 80)
+        : undefined;
+    const eventId = String(
+      raw.eventId || cleanMsgId || `cht_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+    );
+    if (this.seenChatEventIds.has(eventId) || (cleanMsgId && this.seenChatEventIds.has(cleanMsgId))) {
+      return { accepted: false };
+    }
+    const nowMs = Date.now();
+    this.seenChatEventIds.set(eventId, nowMs);
+    if (cleanMsgId) {
+      this.seenChatEventIds.set(cleanMsgId, nowMs);
+    }
+    if (this.seenChatEventIds.size > 2000) {
+      const firstKey = this.seenChatEventIds.keys().next().value;
+      if (firstKey !== undefined) this.seenChatEventIds.delete(firstKey);
+    }
+
+    const normalized: TikTokRelayChatPayload = {
+      eventId,
+      sseEventId: raw.sseEventId,
+      isSimulated: raw.isSimulated,
+      replayed: raw.replayed,
+      userId: cleanUserId,
+      username: cleanUser,
+      nickname: raw.nickname
+        ? String(raw.nickname).slice(0, 60)
+        : raw.user?.nickname
+        ? String(raw.user.nickname).slice(0, 60)
+        : undefined,
+      comment: cleanComment,
+      msgId: cleanMsgId,
+      timestamp: raw.timestamp || new Date().toISOString(),
+    };
+
+    this.callbacks.onChatEvent?.(normalized);
+    return { accepted: true, chat: normalized };
   }
 
   /**
@@ -714,9 +821,33 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     return { accepted: true, buffered: false, finalized: normalized };
   }
 
+  private computeReconnectDelayMs(
+    attempt: number,
+    errorCategory?: string | null,
+    retryAfterSec?: number | null
+  ): number {
+    const baseMs = Math.max(2, this.config.retryDelaySec || 5) * 1000;
+    const rawExpMs = Math.min(this.options.maxBackoffMs, baseMs * Math.pow(2, Math.max(0, attempt - 1)));
+    const jitterFactor = 0.8 + Math.max(0, Math.min(1, this.options.rng())) * 0.4;
+    let delayMs = Math.min(this.options.maxBackoffMs, Math.max(2000, Math.round(rawExpMs * jitterFactor)));
+    if (errorCategory === 'rate_limited' && retryAfterSec && retryAfterSec > 0) {
+      delayMs = Math.max(delayMs, Math.min(retryAfterSec * 1000, 30 * 60 * 1000));
+    }
+    return delayMs;
+  }
+
   private scheduleReconnect(cleanHandle: string, reason: string): void {
     if (this.manualDisconnect) return;
     if (this.reconnectTimer !== null) return;
+
+    if (this.lastErrorCategory === 'euler_business_plan_required') {
+      this.emitStatus('error', reason, {
+        lastErrorCategory: this.lastErrorCategory,
+        retryAfterSec: this.lastRetryAfterSec,
+      });
+      this.callbacks.onLog?.('error', reason);
+      return;
+    }
 
     if (!this.config.autoReconnect || this.retryCount >= this.config.maxRetries) {
       const exhaustedMsg =
@@ -729,8 +860,11 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     }
 
     this.retryCount += 1;
-    const baseMs = Math.max(2, this.config.retryDelaySec || 5) * 1000;
-    const delayMs = Math.min(this.options.maxBackoffMs, baseMs * Math.pow(2, this.retryCount - 1));
+    const delayMs = this.computeReconnectDelayMs(
+      this.retryCount,
+      this.lastErrorCategory,
+      this.lastRetryAfterSec
+    );
     const msg = `${reason}. ${Math.round(delayMs / 1000)} sn sonra yeniden deneniyor (${this.retryCount}/${this.config.maxRetries})...`;
 
     this.emitStatus('connecting', msg);
@@ -829,6 +963,9 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
             viewerCount: typeof data.viewerCount === 'number' ? data.viewerCount : null,
             followerCount: typeof data.followerCount === 'number' ? data.followerCount : undefined,
             lastEvent: data.lastEvent ?? undefined,
+            lastErrorCategory: data.lastErrorCategory ?? null,
+            retryAfterSec: typeof data.retryAfterSec === 'number' ? data.retryAfterSec : null,
+            activeSignerProvider: data.activeSignerProvider ?? undefined,
           });
 
           // Controlled reconnect when an active TikTok stream drops/ends cleanly via status event
@@ -836,6 +973,7 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
             !this.manualDisconnect &&
             this.config.autoReconnect &&
             this.hadConnectedSession &&
+            data.lastErrorCategory !== 'euler_business_plan_required' &&
             (nextState === 'disconnected' || nextState === 'error')
           ) {
             this.hadConnectedSession = false;
@@ -892,6 +1030,26 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         });
       } catch {
         this.callbacks.onLog?.('warning', 'Relay sunucusundan geçersiz takipçi verisi alındı.');
+      }
+    });
+
+    es.addEventListener('chat', (ev) => {
+      const msgEv = ev as MessageEvent;
+      try {
+        const rawChat = JSON.parse(msgEv.data) as RawChatInput;
+        const resolvedSseId = msgEv.lastEventId || rawChat.sseEventId;
+        if (resolvedSseId) {
+          this.rememberLastEventId(baseUrl, cleanHandle, resolvedSseId);
+        }
+        if (sseOpened) {
+          this.retryCount = 0;
+        }
+        this.ingestRawChatEvent({
+          ...rawChat,
+          sseEventId: resolvedSseId,
+        });
+      } catch {
+        this.callbacks.onLog?.('warning', 'Relay sunucusundan geçersiz yorum verisi alındı.');
       }
     });
 
@@ -998,6 +1156,9 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         roomId?: string | null;
         viewerCount?: number | null;
         initialEventCursor?: string;
+        lastErrorCategory?: string | null;
+        retryAfterSec?: number | null;
+        activeSignerProvider?: string | null;
         error?: string;
       } = {};
       if (rawText.trim()) {
@@ -1008,6 +1169,14 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         }
       }
 
+      const headerRetryAfter = Number(response.headers?.get?.('retry-after'));
+      const resolvedRetryAfterSec =
+        typeof payload.retryAfterSec === 'number' && payload.retryAfterSec > 0
+          ? payload.retryAfterSec
+          : Number.isFinite(headerRetryAfter) && headerRetryAfter > 0
+          ? Math.ceil(headerRetryAfter)
+          : null;
+
       if (!response.ok || !payload.ok) {
         const errMsg =
           response.status === 404
@@ -1017,6 +1186,10 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         this.emitStatus(payload.state === 'disconnected' ? 'disconnected' : 'error', errMsg, {
           roomId: null,
           viewerCount: null,
+          lastErrorCategory:
+            payload.lastErrorCategory ?? (response.status === 429 ? 'rate_limited' : null),
+          retryAfterSec: resolvedRetryAfterSec,
+          activeSignerProvider: payload.activeSignerProvider ?? undefined,
         });
         return { ok: false, error: errMsg };
       }
@@ -1025,7 +1198,11 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         const errMsg =
           payload.error ||
           'Relay sunucusu gerçek TikTok canlı oda el sıkışmasını doğrulamadı.';
-        this.emitStatus(payload.state || 'disconnected', errMsg);
+        this.emitStatus(payload.state || 'disconnected', errMsg, {
+          lastErrorCategory: payload.lastErrorCategory ?? null,
+          retryAfterSec: resolvedRetryAfterSec,
+          activeSignerProvider: payload.activeSignerProvider ?? undefined,
+        });
         return { ok: false, error: errMsg };
       }
 
@@ -1040,6 +1217,9 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
       this.emitStatus('connected', null, {
         roomId: payload.roomId ?? null,
         viewerCount: typeof payload.viewerCount === 'number' ? payload.viewerCount : null,
+        lastErrorCategory: null,
+        retryAfterSec: null,
+        activeSignerProvider: payload.activeSignerProvider ?? undefined,
       });
       this.openRelayEventStream(baseUrl, cleanHandle, false);
       this.callbacks.onLog?.(
@@ -1064,10 +1244,13 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
     service?: string;
     connectorVersion?: string;
     simulationEnabled?: boolean;
+    activeSignerProvider?: string;
+    requestedSignerProvider?: string;
     signerMode?: string;
     hasSignApiKey?: boolean;
     hasCustomWsSigner?: boolean;
     hasCustomHttpSigner?: boolean;
+    eulerFallbackDisabled?: boolean;
     eulerBusinessEndpointBlocked?: boolean;
     endpoints?: string[];
     error?: string;
@@ -1109,10 +1292,13 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         service?: string;
         connectorVersion?: string;
         simulationEnabled?: boolean;
+        activeSignerProvider?: string;
+        requestedSignerProvider?: string;
         signerMode?: string;
         hasSignApiKey?: boolean;
         hasCustomWsSigner?: boolean;
         hasCustomHttpSigner?: boolean;
+        eulerFallbackDisabled?: boolean;
         eulerBusinessEndpointBlocked?: boolean;
         endpoints?: string[];
         error?: string;
@@ -1125,6 +1311,9 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
           error: json.error || `HTTP ${res.status}`,
         };
       }
+      if (json.activeSignerProvider) {
+        this.activeSignerProvider = json.activeSignerProvider;
+      }
       return {
         ok: true,
         latencyMs,
@@ -1132,10 +1321,13 @@ export class TikTokLiveConnectorService implements ITikTokGiftAdapter {
         service: json.service,
         connectorVersion: json.connectorVersion,
         simulationEnabled: json.simulationEnabled,
+        activeSignerProvider: json.activeSignerProvider,
+        requestedSignerProvider: json.requestedSignerProvider,
         signerMode: json.signerMode,
         hasSignApiKey: json.hasSignApiKey,
         hasCustomWsSigner: json.hasCustomWsSigner,
         hasCustomHttpSigner: json.hasCustomHttpSigner,
+        eulerFallbackDisabled: json.eulerFallbackDisabled,
         eulerBusinessEndpointBlocked: json.eulerBusinessEndpointBlocked,
         endpoints: json.endpoints,
       };
@@ -1222,6 +1414,7 @@ const DEFAULT_SHARED_TIKTOK_CONFIG: TikTokConnectionConfig = {
 type BufferedManagerEvent =
   | { type: 'gift'; payload: TikTokRelayGiftPayload }
   | { type: 'follow'; payload: TikTokRelayFollowPayload }
+  | { type: 'chat'; payload: TikTokRelayChatPayload }
   | { type: 'gap'; payload: TikTokRecoveryGapInfo };
 
 /**
@@ -1305,6 +1498,27 @@ export class SharedTikTokConnectionManager {
           this.bufferDetachedEvent({ type: 'follow', payload: follow });
         }
       },
+      onChatEvent: (chat) => {
+        if (!chat.isSimulated) {
+          const uname = chat.username || chat.nickname || 'tiktok_izleyici';
+          this.latestStatus = {
+            ...this.latestStatus,
+            lastEvent: {
+              kind: 'chat',
+              username: uname,
+              displayUsername: `@${uname}`,
+              summary: `Yorum: ${chat.comment}`,
+              timestamp: chat.timestamp || new Date().toISOString(),
+              eventId: chat.eventId,
+            },
+          };
+        }
+        if (this.consumerCallbacks?.onChatEvent) {
+          this.consumerCallbacks.onChatEvent(chat);
+        } else {
+          this.bufferDetachedEvent({ type: 'chat', payload: chat });
+        }
+      },
       onRecoveryGap: (gap) => {
         if (this.consumerCallbacks?.onRecoveryGap) {
           this.consumerCallbacks.onRecoveryGap(gap);
@@ -1355,6 +1569,7 @@ export class SharedTikTokConnectionManager {
       for (const item of queued) {
         if (item.type === 'gift') callbacks.onFinalizedGift?.(item.payload);
         else if (item.type === 'follow') callbacks.onFollowEvent?.(item.payload);
+        else if (item.type === 'chat') callbacks.onChatEvent?.(item.payload);
         else if (item.type === 'gap') callbacks.onRecoveryGap?.(item.payload);
       }
     }

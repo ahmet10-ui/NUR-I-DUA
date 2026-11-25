@@ -112,24 +112,45 @@ test('Mid gift (11-35 coins) draws non-consecutively from Başlangıç Duaları 
   assert.equal(rejected.reason, 'tier_disabled');
 });
 
-test('High gift (36-199 coins) verified Arabic audio files exist with matching SHA-256 and CC0 license', () => {
-  assert.ok(DEFAULT_HIGH_TIER_DUAS.length >= 2);
+test('High gift (36-199 coins) verified Arabic audio files pass SHA-256/CC0 and all 8 entries isolate Arabic & meal from Turkish TTS', () => {
+  assert.ok(DEFAULT_HIGH_TIER_DUAS.length >= 8);
   const publicDir = path.resolve(process.cwd(), 'public');
 
+  const verifiedEntries = DEFAULT_HIGH_TIER_DUAS.filter((d) => d.audioStatus === 'verified_ready');
+  const pendingEntries = DEFAULT_HIGH_TIER_DUAS.filter(
+    (d) => d.audioStatus === 'pending_license_verification'
+  );
+  assert.equal(verifiedEntries.length, 7);
+  assert.equal(pendingEntries.length, 1);
+  assert.equal(pendingEntries[0].id, 'high-dua-salati-tefriciye');
+
   for (const dua of DEFAULT_HIGH_TIER_DUAS) {
-    assert.equal(dua.audioStatus, 'verified_ready');
-    assert.ok(dua.audioLicense.includes('CC0'), `Expected CC0 license on ${dua.id}`);
     assert.ok(dua.sourceCitation.length > 20, `Expected source citation on ${dua.id}`);
     assert.ok(containsArabicScript(dua.arabicHarekeli), `Expected Arabic script on ${dua.id}`);
-    assert.ok(dua.audioSha256 && dua.audioSha256.length === 64, `Expected SHA-256 on ${dua.id}`);
+    assert.ok(dua.turkishMeaning.trim().length > 40, `Expected Turkish meal on ${dua.id}`);
 
-    const relativeAudioPath = dua.audioUrl.replace(/^\//, '');
-    const fullPath = path.join(publicDir, relativeAudioPath);
-    assert.equal(fs.existsSync(fullPath), true, `Verified audio file missing: ${fullPath}`);
+    if (dua.audioStatus === 'verified_ready') {
+      assert.ok(
+        dua.audioLicense.includes('CC0') || dua.audioLicense.includes('CC BY-SA 4.0'),
+        `Expected verified open license on ${dua.id}, got: ${dua.audioLicense}`
+      );
+      assert.ok(dua.audioSha256 && dua.audioSha256.length === 64, `Expected SHA-256 on ${dua.id}`);
 
-    const fileBuf = fs.readFileSync(fullPath);
-    const actualHash = crypto.createHash('sha256').update(fileBuf).digest('hex');
-    assert.equal(actualHash, dua.audioSha256, `SHA-256 mismatch for ${dua.audioUrl}`);
+      const relativeAudioPath = dua.audioUrl.replace(/^\//, '');
+      const fullPath = path.join(publicDir, relativeAudioPath);
+      assert.equal(fs.existsSync(fullPath), true, `Verified audio file missing: ${fullPath}`);
+
+      const fileBuf = fs.readFileSync(fullPath);
+      const actualHash = crypto.createHash('sha256').update(fileBuf).digest('hex');
+      assert.equal(actualHash, dua.audioSha256, `SHA-256 mismatch for ${dua.audioUrl}`);
+    } else {
+      assert.equal(dua.audioUrl, '', `Pending entry ${dua.id} must not fabricate an audioUrl`);
+      assert.equal(
+        dua.audioLicense.includes('CC0'),
+        false,
+        `Pending entry ${dua.id} must not fabricate a CC0 license`
+      );
+    }
 
     const turkishSpeech = buildHighTierTurkishSpeech(dua, 'Ahmet');
     assert.equal(
@@ -152,8 +173,14 @@ test('High gift (36-199 coins) verified Arabic audio files exist with matching S
     assert.ok(turkishSpeech.toLowerCase().includes('akraba'));
   }
 
+  // Salât-ı Tefriciye must be explicitly labeled as traditional salavat/dua, NOT Qur'an
+  const tefriciye = DEFAULT_HIGH_TIER_DUAS.find((d) => d.id === 'high-dua-salati-tefriciye');
+  assert.ok(tefriciye);
+  assert.match(tefriciye.sourceCitation, /Kur’ân-ı Kerîm ayeti değildir|Salavât/i);
+  assert.match(tefriciye.turkishMeaning, /Kur’ân-ı Kerîm ayeti değildir/i);
+
   let lastHighId = null;
-  for (let i = 0; i < 20; i += 1) {
+  for (let i = 0; i < 40; i += 1) {
     const picked = pickNonConsecutiveHighDua(DEFAULT_HIGH_TIER_DUAS, lastHighId);
     assert.ok(picked);
     if (lastHighId) assert.notEqual(picked.id, lastHighId);
